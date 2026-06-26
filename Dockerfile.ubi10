@@ -1,0 +1,118 @@
+# Multi-stage Dockerfile for Prometheus using UBI10
+# Stage 1: Builder - Build Prometheus binaries and React UI
+FROM registry.access.redhat.com/ubi10/ubi:latest AS builder
+
+# Install build dependencies
+RUN dnf install -y \
+    golang \
+    nodejs \
+    npm \
+    git \
+    make \
+    gcc \
+    gcc-c++ \
+    bzip2 \
+    findutils \
+    && dnf clean all
+
+# Install Yarn
+RUN npm install -g yarn
+
+# Set Go environment
+ENV GO111MODULE=on \
+    CGO_ENABLED=0 \
+    GOOS=linux \
+    GOARCH=amd64
+
+WORKDIR /build
+
+# Copy source code
+COPY . .
+
+# Set Node.js compatibility for older webpack
+ENV NODE_OPTIONS=--openssl-legacy-provider
+
+# Download Go dependencies
+RUN go mod download
+
+# Install Node.js dependencies
+RUN cd web/ui/react-app && yarn install --frozen-lockfile
+
+# Build React UI
+RUN cd web/ui/react-app && \
+    PUBLIC_URL=. yarn build && \
+    rm -rf ../static/react && \
+    mv build ../static/react
+
+# Generate Go assets from React build
+RUN cd web/ui && go generate -x -v
+
+# Build Prometheus binaries with embedded assets
+RUN go build -tags builtinassets -o prometheus ./cmd/prometheus && \
+    go build -o promtool ./cmd/promtool
+
+# Bundle npm licenses
+RUN find web/ui/react-app/node_modules -iname "license*" | \
+    tar cfj npm_licenses.tar.bz2 --transform 's/^/npm_licenses\//' --files-from=-
+
+# Stage 2: Runtime - Minimal UBI10 image
+FROM registry.access.redhat.com/ubi10/ubi-minimal:latest
+
+LABEL maintainer="The Prometheus Authors <prometheus-developers@googlegroups.com>" \
+      name="prometheus" \
+      vendor="Prometheus" \
+      version="2.x" \
+      release="1" \
+      summary="Prometheus monitoring system and time series database" \
+      description="Prometheus is an open-source systems monitoring and alerting toolkit"
+
+# Install minimal runtime dependencies
+RUN microdnf install -y shadow-utils && \
+    microdnf clean all
+
+# Create prometheus user and group
+RUN groupadd -r -g 65534 nobody && \
+    useradd -r -u 65534 -g nobody -s /sbin/nologin -c "Nobody user" nobody || true
+
+# Copy binaries from builder
+COPY --from=builder /build/prometheus /bin/prometheus
+COPY --from=builder /build/promtool /bin/promtool
+
+# Copy configuration and web assets
+COPY --from=builder /build/documentation/examples/prometheus.yml /etc/prometheus/prometheus.yml
+COPY --from=builder /build/console_libraries/ /usr/share/prometheus/console_libraries/
+COPY --from=builder /build/consoles/ /usr/share/prometheus/consoles/
+COPY --from=builder /build/web/ui/templates/ /usr/share/prometheus/web/ui/templates/
+COPY --from=builder /build/web/ui/static/ /usr/share/prometheus/web/ui/static/
+
+# Copy license files
+COPY --from=builder /build/LICENSE /LICENSE
+COPY --from=builder /build/NOTICE /NOTICE
+COPY --from=builder /build/npm_licenses.tar.bz2 /npm_licenses.tar.bz2
+
+# Create symbolic links
+RUN ln -s /usr/share/prometheus/console_libraries /etc/prometheus/console_libraries && \
+    ln -s /usr/share/prometheus/consoles /etc/prometheus/consoles
+
+# Create data directory and set permissions
+RUN mkdir -p /prometheus && \
+    chown -R nobody:nobody /etc/prometheus /prometheus
+
+# Switch to nobody user
+USER nobody
+
+# Expose Prometheus port
+EXPOSE 9090
+
+# Set data directory as volume
+VOLUME ["/prometheus"]
+
+# Set working directory
+WORKDIR /prometheus
+
+# Set entrypoint and default command
+ENTRYPOINT ["/bin/prometheus"]
+CMD ["--config.file=/etc/prometheus/prometheus.yml", \
+     "--storage.tsdb.path=/prometheus", \
+     "--web.console.libraries=/usr/share/prometheus/console_libraries", \
+     "--web.console.templates=/usr/share/prometheus/consoles"]
