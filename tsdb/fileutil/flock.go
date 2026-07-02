@@ -1,4 +1,4 @@
-// Copyright 2016 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -29,7 +29,7 @@ type Releaser interface {
 // locking has failed. Neither this function nor the returned Releaser is
 // goroutine-safe.
 func Flock(fileName string) (r Releaser, existed bool, err error) {
-	if err = os.MkdirAll(filepath.Dir(fileName), 0755); err != nil {
+	if err = os.MkdirAll(filepath.Dir(fileName), 0o755); err != nil {
 		return nil, false, err
 	}
 

@@ -1,9 +1,8 @@
 ---
-title: Recording rules
+title: Defining recording rules
+nav_title: Recording rules
 sort_rank: 2
 ---
-
-# Defining recording rules
 
 ## Configuring rules
 
@@ -20,19 +19,21 @@ process. The changes are only applied if all rule files are well-formatted.
 ## Syntax-checking rules
 
 To quickly check whether a rule file is syntactically correct without starting
-a Prometheus server, install and run Prometheus's `promtool` command-line
-utility tool:
+a Prometheus server, you can use Prometheus's `promtool` command-line utility
+tool:
 
 ```bash
-go get github.com/prometheus/prometheus/cmd/promtool
 promtool check rules /path/to/example.rules.yml
 ```
+
+The `promtool` binary is part of the `prometheus` archive offered on the
+project's [download page](https://prometheus.io/download/).
 
 When the file is syntactically valid, the checker prints a textual
 representation of the parsed rules to standard output and then exits with
 a `0` return status.
 
-If there are any syntax errors or invalid input arguments, it prints an error 
+If there are any syntax errors or invalid input arguments, it prints an error
 message to standard error and exits with a `1` return status.
 
 ## Recording rules
@@ -45,7 +46,11 @@ dashboards, which need to query the same expression repeatedly every time they
 refresh.
 
 Recording and alerting rules exist in a rule group. Rules within a group are
-run sequentially at a regular interval.
+run sequentially at a regular interval, with the same evaluation time.
+The names of recording rules must be
+[valid metric names](https://prometheus.io/docs/concepts/data_model/#metric-names-and-labels).
+The names of alerting rules must be
+[valid label values](https://prometheus.io/docs/concepts/data_model/#metric-names-and-labels).
 
 The syntax of a rule file is:
 
@@ -60,17 +65,30 @@ A simple example rules file would be:
 groups:
   - name: example
     rules:
-    - record: job:http_inprogress_requests:sum
-      expr: sum(http_inprogress_requests) by (job)
+    - record: code:prometheus_http_requests_total:sum
+      expr: sum by (code) (prometheus_http_requests_total)
 ```
 
 ### `<rule_group>`
-```
+
+```yaml
 # The name of the group. Must be unique within a file.
 name: <string>
 
 # How often rules in the group are evaluated.
 [ interval: <duration> | default = global.evaluation_interval ]
+
+# Limit the number of alerts an alerting rule and series a recording
+# rule can produce. 0 is no limit.
+[ limit: <int> | default = 0 ]
+
+# Offset the rule evaluation timestamp of this particular group by the specified duration into the past.
+[ query_offset: <duration> | default = global.rule_query_offset ]
+
+# Labels to add or overwrite before storing the result for its rules.
+# Labels defined in <rule> will override the key if it has a collision.
+labels:
+  [ <labelname>: <labelvalue> ]
 
 rules:
   [ - <rule> ... ]
@@ -80,7 +98,7 @@ rules:
 
 The syntax for recording rules is:
 
-```
+```yaml
 # The name of the time series to output to. Must be a valid metric name.
 record: <string>
 
@@ -96,8 +114,8 @@ labels:
 
 The syntax for alerting rules is:
 
-```
-# The name of the alert. Must be a valid metric name.
+```yaml
+# The name of the alert. Must be a valid label value.
 alert: <string>
 
 # The PromQL expression to evaluate. Every evaluation cycle this is
@@ -109,6 +127,10 @@ expr: <string>
 # Alerts which have not yet fired for long enough are considered pending.
 [ for: <duration> | default = 0s ]
 
+# How long an alert will continue firing after the condition that triggered it
+# has cleared.
+[ keep_firing_for: <duration> | default = 0s ]
+
 # Labels to add or overwrite for each alert.
 labels:
   [ <labelname>: <tmpl_string> ]
@@ -118,3 +140,21 @@ annotations:
   [ <labelname>: <tmpl_string> ]
 ```
 
+See also the
+[best practices for naming metrics created by recording rules](https://prometheus.io/docs/practices/rules/#recording-rules).
+
+## Limiting alerts and series
+
+A limit for alerts produced by alerting rules and series produced recording rules
+can be configured per-group. When the limit is exceeded, _all_ series produced
+by the rule are discarded, and if it's an alerting rule, _all_ alerts for
+the rule, active, pending, or inactive, are cleared as well. The event will be
+recorded as an error in the evaluation, and as such no stale markers are
+written.
+
+## Rule query offset
+This is useful to ensure the underlying metrics have been received and stored in Prometheus. Metric availability delays are more likely to occur when Prometheus is running as a remote write target due to the nature of distributed systems, but can also occur when there's anomalies with scraping and/or short evaluation intervals.
+
+## Failed rule evaluations due to slow evaluation
+
+If a rule group hasn't finished evaluating before its next evaluation is supposed to start (as defined by the `evaluation_interval`), the next evaluation will be skipped. Subsequent evaluations of the rule group will continue to be skipped until the initial evaluation either completes or times out. When this happens, there will be a gap in the metric produced by the recording rule. The `rule_group_iterations_missed_total` metric will be incremented for each missed iteration of the rule group.

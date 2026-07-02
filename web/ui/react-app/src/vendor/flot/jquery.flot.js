@@ -1,13 +1,7 @@
-/**
- *
- * THIS FILE WAS COPIED INTO PROMETHEUS FROM GRAFANA'S VENDORED FORK OF FLOT
- * (LIVING AT https://github.com/grafana/grafana/tree/master/public/vendor/flot),
- * WHICH CONTAINS FIXES FOR DISPLAYING NULL VALUES IN STACKED GRAPHS. THE ORIGINAL
- * FLOT CODE WAS LICENSED UNDER THE MIT LICENSE AS STATED BELOW. ADDITIONAL
- * CHANGES HAVE BEEN CONTRIBUTED TO THE GRAFANA FORK UNDER AN APACHE 2 LICENSE, SEE
- * https://github.com/grafana/grafana/blob/master/license.
- *
- */
+/*
+SPDX-License-Identifier: MIT
+Source: https://github.com/grafana/grafana/blob/main/public/vendor/flot/jquery.flot.js
+*/
 
 /* eslint-disable prefer-spread */
 /* eslint-disable no-loop-func */
@@ -435,7 +429,7 @@ Licensed under the MIT license.
   //
   // Each position after the first receives a clone of the original element.
   //
-  // The idea is that that the width, height, and general 'identity' of the
+  // The idea is that the width, height, and general 'identity' of the
   // text is constant no matter where it is placed; the placements are a
   // secondary property.
   //

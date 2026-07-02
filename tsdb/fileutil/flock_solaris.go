@@ -1,4 +1,4 @@
-// Copyright 2016 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// +build solaris
+//go:build solaris
 
 package fileutil
 
@@ -45,7 +45,7 @@ func (l *unixLock) set(lock bool) error {
 }
 
 func newLock(fileName string) (Releaser, error) {
-	f, err := os.OpenFile(fileName, os.O_RDWR|os.O_CREATE, 0644)
+	f, err := os.OpenFile(fileName, os.O_RDWR|os.O_CREATE, 0o666)
 	if err != nil {
 		return nil, err
 	}

@@ -1,32 +1,32 @@
 ---
 title: Management API
-sort_rank: 7
+sort_rank: 8
 ---
 
-# Management API
-
-Prometheus provides a set of management API to ease automation and integrations.
+Prometheus provides a set of management APIs to facilitate automation and integration.
 
 
-### Health check
+## Health check
 
 ```
 GET /-/healthy
+HEAD /-/healthy
 ```
 
 This endpoint always returns 200 and should be used to check Prometheus health.
 
 
-### Readiness check
+## Readiness check
 
 ```
 GET /-/ready
+HEAD /-/ready
 ```
 
 This endpoint returns 200 when Prometheus is ready to serve traffic (i.e. respond to queries).
 
 
-### Reload
+## Reload
 
 ```
 PUT  /-/reload
@@ -38,7 +38,7 @@ This endpoint triggers a reload of the Prometheus configuration and rule files. 
 Alternatively, a configuration reload can be triggered by sending a `SIGHUP` to the Prometheus process.
 
 
-### Quit
+## Quit
 
 ```
 PUT  /-/quit

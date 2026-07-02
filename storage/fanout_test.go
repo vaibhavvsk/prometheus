@@ -1,4 +1,4 @@
-// Copyright 2017 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -11,283 +11,594 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package storage
+package storage_test
 
 import (
-	"fmt"
-	"math"
+	"context"
+	"errors"
+	"strconv"
 	"testing"
 
-	"github.com/prometheus/prometheus/pkg/labels"
+	"github.com/prometheus/common/model"
+	"github.com/stretchr/testify/require"
+
+	"github.com/prometheus/prometheus/model/exemplar"
+	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/storage"
+	"github.com/prometheus/prometheus/tsdb/chunkenc"
+	"github.com/prometheus/prometheus/tsdb/tsdbutil"
+	"github.com/prometheus/prometheus/util/annotations"
+	"github.com/prometheus/prometheus/util/teststorage"
 	"github.com/prometheus/prometheus/util/testutil"
 )
 
-func TestMergeStringSlices(t *testing.T) {
-	for _, tc := range []struct {
-		input    [][]string
-		expected []string
-	}{
-		{},
-		{[][]string{{"foo"}}, []string{"foo"}},
-		{[][]string{{"foo"}, {"bar"}}, []string{"bar", "foo"}},
-		{[][]string{{"foo"}, {"bar"}, {"baz"}}, []string{"bar", "baz", "foo"}},
-	} {
-		testutil.Equals(t, tc.expected, mergeStringSlices(tc.input))
-	}
-}
+func TestFanout_SelectSorted(t *testing.T) {
+	inputLabel := labels.FromStrings(model.MetricNameLabel, "a")
+	outputLabel := labels.FromStrings(model.MetricNameLabel, "a")
 
-func TestMergeTwoStringSlices(t *testing.T) {
-	for _, tc := range []struct {
-		a, b, expected []string
-	}{
-		{[]string{}, []string{}, []string{}},
-		{[]string{"foo"}, nil, []string{"foo"}},
-		{nil, []string{"bar"}, []string{"bar"}},
-		{[]string{"foo"}, []string{"bar"}, []string{"bar", "foo"}},
-		{[]string{"foo"}, []string{"bar", "baz"}, []string{"bar", "baz", "foo"}},
-		{[]string{"foo"}, []string{"foo"}, []string{"foo"}},
-	} {
-		testutil.Equals(t, tc.expected, mergeTwoStringSlices(tc.a, tc.b))
-	}
-}
+	inputTotalSize := 0
+	ctx := context.Background()
 
-func TestMergeSeriesSet(t *testing.T) {
-	for _, tc := range []struct {
-		input    []SeriesSet
-		expected SeriesSet
-	}{
-		{
-			input:    []SeriesSet{newMockSeriesSet()},
-			expected: newMockSeriesSet(),
-		},
+	priStorage := teststorage.New(t)
+	app1 := priStorage.Appender(ctx)
+	app1.Append(0, inputLabel, 0, 0)
+	inputTotalSize++
+	app1.Append(0, inputLabel, 1000, 1)
+	inputTotalSize++
+	app1.Append(0, inputLabel, 2000, 2)
+	inputTotalSize++
+	err := app1.Commit()
+	require.NoError(t, err)
 
-		{
-			input: []SeriesSet{newMockSeriesSet(
-				newMockSeries(labels.FromStrings("bar", "baz"), []sample{{1, 1}, {2, 2}}),
-				newMockSeries(labels.FromStrings("foo", "bar"), []sample{{0, 0}, {1, 1}}),
-			)},
-			expected: newMockSeriesSet(
-				newMockSeries(labels.FromStrings("bar", "baz"), []sample{{1, 1}, {2, 2}}),
-				newMockSeries(labels.FromStrings("foo", "bar"), []sample{{0, 0}, {1, 1}}),
-			),
-		},
+	remoteStorage1 := teststorage.New(t)
+	app2 := remoteStorage1.Appender(ctx)
+	app2.Append(0, inputLabel, 3000, 3)
+	inputTotalSize++
+	app2.Append(0, inputLabel, 4000, 4)
+	inputTotalSize++
+	app2.Append(0, inputLabel, 5000, 5)
+	inputTotalSize++
+	err = app2.Commit()
+	require.NoError(t, err)
 
-		{
-			input: []SeriesSet{newMockSeriesSet(
-				newMockSeries(labels.FromStrings("foo", "bar"), []sample{{0, 0}, {1, 1}}),
-			), newMockSeriesSet(
-				newMockSeries(labels.FromStrings("bar", "baz"), []sample{{1, 1}, {2, 2}}),
-			)},
-			expected: newMockSeriesSet(
-				newMockSeries(labels.FromStrings("bar", "baz"), []sample{{1, 1}, {2, 2}}),
-				newMockSeries(labels.FromStrings("foo", "bar"), []sample{{0, 0}, {1, 1}}),
-			),
-		},
+	remoteStorage2 := teststorage.New(t)
 
-		{
-			input: []SeriesSet{newMockSeriesSet(
-				newMockSeries(labels.FromStrings("bar", "baz"), []sample{{1, 1}, {2, 2}}),
-				newMockSeries(labels.FromStrings("foo", "bar"), []sample{{0, 0}, {1, 1}}),
-			), newMockSeriesSet(
-				newMockSeries(labels.FromStrings("bar", "baz"), []sample{{3, 3}, {4, 4}}),
-				newMockSeries(labels.FromStrings("foo", "bar"), []sample{{2, 2}, {3, 3}}),
-			)},
-			expected: newMockSeriesSet(
-				newMockSeries(labels.FromStrings("bar", "baz"), []sample{{1, 1}, {2, 2}, {3, 3}, {4, 4}}),
-				newMockSeries(labels.FromStrings("foo", "bar"), []sample{{0, 0}, {1, 1}, {2, 2}, {3, 3}}),
-			),
-		},
-		{
-			input: []SeriesSet{newMockSeriesSet(
-				newMockSeries(labels.FromStrings("foo", "bar"), []sample{{0, math.NaN()}}),
-			), newMockSeriesSet(
-				newMockSeries(labels.FromStrings("foo", "bar"), []sample{{0, math.NaN()}}),
-			)},
-			expected: newMockSeriesSet(
-				newMockSeries(labels.FromStrings("foo", "bar"), []sample{{0, math.NaN()}}),
-			),
-		},
-	} {
-		merged := NewMergeSeriesSet(tc.input, nil)
-		for merged.Next() {
-			testutil.Assert(t, tc.expected.Next(), "Expected Next() to be true")
-			actualSeries := merged.At()
-			expectedSeries := tc.expected.At()
-			testutil.Equals(t, expectedSeries.Labels(), actualSeries.Labels())
-			testutil.Equals(t, drainSamples(expectedSeries.Iterator()), drainSamples(actualSeries.Iterator()))
-		}
-		testutil.Assert(t, !tc.expected.Next(), "Expected Next() to be false")
-	}
-}
+	app3 := remoteStorage2.Appender(ctx)
+	app3.Append(0, inputLabel, 6000, 6)
+	inputTotalSize++
+	app3.Append(0, inputLabel, 7000, 7)
+	inputTotalSize++
+	app3.Append(0, inputLabel, 8000, 8)
+	inputTotalSize++
 
-func TestMergeIterator(t *testing.T) {
-	for _, tc := range []struct {
-		input    []SeriesIterator
-		expected []sample
-	}{
-		{
-			input: []SeriesIterator{
-				newListSeriesIterator([]sample{{0, 0}, {1, 1}}),
-			},
-			expected: []sample{{0, 0}, {1, 1}},
-		},
-		{
-			input: []SeriesIterator{
-				newListSeriesIterator([]sample{{0, 0}, {1, 1}}),
-				newListSeriesIterator([]sample{{2, 2}, {3, 3}}),
-			},
-			expected: []sample{{0, 0}, {1, 1}, {2, 2}, {3, 3}},
-		},
-		{
-			input: []SeriesIterator{
-				newListSeriesIterator([]sample{{0, 0}, {3, 3}}),
-				newListSeriesIterator([]sample{{1, 1}, {4, 4}}),
-				newListSeriesIterator([]sample{{2, 2}, {5, 5}}),
-			},
-			expected: []sample{{0, 0}, {1, 1}, {2, 2}, {3, 3}, {4, 4}, {5, 5}},
-		},
-		{
-			input: []SeriesIterator{
-				newListSeriesIterator([]sample{{0, 0}, {1, 1}}),
-				newListSeriesIterator([]sample{{0, 0}, {2, 2}}),
-				newListSeriesIterator([]sample{{2, 2}, {3, 3}}),
-			},
-			expected: []sample{{0, 0}, {1, 1}, {2, 2}, {3, 3}},
-		},
-	} {
-		merged := newMergeIterator(tc.input)
-		actual := drainSamples(merged)
-		testutil.Equals(t, tc.expected, actual)
-	}
-}
+	err = app3.Commit()
+	require.NoError(t, err)
 
-func TestMergeIteratorSeek(t *testing.T) {
-	for _, tc := range []struct {
-		input    []SeriesIterator
-		seek     int64
-		expected []sample
-	}{
-		{
-			input: []SeriesIterator{
-				newListSeriesIterator([]sample{{0, 0}, {1, 1}, {2, 2}}),
-			},
-			seek:     1,
-			expected: []sample{{1, 1}, {2, 2}},
-		},
-		{
-			input: []SeriesIterator{
-				newListSeriesIterator([]sample{{0, 0}, {1, 1}}),
-				newListSeriesIterator([]sample{{2, 2}, {3, 3}}),
-			},
-			seek:     2,
-			expected: []sample{{2, 2}, {3, 3}},
-		},
-		{
-			input: []SeriesIterator{
-				newListSeriesIterator([]sample{{0, 0}, {3, 3}}),
-				newListSeriesIterator([]sample{{1, 1}, {4, 4}}),
-				newListSeriesIterator([]sample{{2, 2}, {5, 5}}),
-			},
-			seek:     2,
-			expected: []sample{{2, 2}, {3, 3}, {4, 4}, {5, 5}},
-		},
-	} {
-		merged := newMergeIterator(tc.input)
-		actual := []sample{}
-		if merged.Seek(tc.seek) {
-			t, v := merged.At()
-			actual = append(actual, sample{t, v})
-		}
-		actual = append(actual, drainSamples(merged)...)
-		testutil.Equals(t, tc.expected, actual)
-	}
-}
+	fanoutStorage := storage.NewFanout(nil, priStorage, remoteStorage1, remoteStorage2)
 
-func drainSamples(iter SeriesIterator) []sample {
-	result := []sample{}
-	for iter.Next() {
-		t, v := iter.At()
-		// NaNs can't be compared normally, so substitute for another value.
-		if math.IsNaN(v) {
-			v = -42
-		}
-		result = append(result, sample{t, v})
-	}
-	return result
-}
+	t.Run("querier", func(t *testing.T) {
+		querier, err := fanoutStorage.Querier(0, 8000)
+		require.NoError(t, err)
+		defer querier.Close()
 
-type mockSeriesSet struct {
-	idx    int
-	series []Series
-}
+		matcher, err := labels.NewMatcher(labels.MatchEqual, model.MetricNameLabel, "a")
+		require.NoError(t, err)
 
-func newMockSeriesSet(series ...Series) SeriesSet {
-	return &mockSeriesSet{
-		idx:    -1,
-		series: series,
-	}
-}
+		seriesSet := querier.Select(ctx, true, nil, matcher)
 
-func (m *mockSeriesSet) Next() bool {
-	m.idx++
-	return m.idx < len(m.series)
-}
-
-func (m *mockSeriesSet) At() Series {
-	return m.series[m.idx]
-}
-
-func (m *mockSeriesSet) Err() error {
-	return nil
-}
-
-var result []sample
-
-func makeSeriesSet(numSeries, numSamples int) SeriesSet {
-	series := []Series{}
-	for j := 0; j < numSeries; j++ {
-		labels := labels.Labels{{Name: "foo", Value: fmt.Sprintf("bar%d", j)}}
-		samples := []sample{}
-		for k := 0; k < numSamples; k++ {
-			samples = append(samples, sample{t: int64(k), v: float64(k)})
-		}
-		series = append(series, newMockSeries(labels, samples))
-	}
-	return newMockSeriesSet(series...)
-}
-
-func makeMergeSeriesSet(numSeriesSets, numSeries, numSamples int) SeriesSet {
-	seriesSets := []SeriesSet{}
-	for i := 0; i < numSeriesSets; i++ {
-		seriesSets = append(seriesSets, makeSeriesSet(numSeries, numSamples))
-	}
-	return NewMergeSeriesSet(seriesSets, nil)
-}
-
-func benchmarkDrain(seriesSet SeriesSet, b *testing.B) {
-	for n := 0; n < b.N; n++ {
+		result := make(map[int64]float64)
+		var labelsResult labels.Labels
+		var iterator chunkenc.Iterator
 		for seriesSet.Next() {
-			result = drainSamples(seriesSet.At().Iterator())
+			series := seriesSet.At()
+			seriesLabels := series.Labels()
+			labelsResult = seriesLabels
+			iterator := series.Iterator(iterator)
+			for iterator.Next() == chunkenc.ValFloat {
+				timestamp, value := iterator.At()
+				result[timestamp] = value
+			}
 		}
+
+		require.Equal(t, labelsResult, outputLabel)
+		require.Len(t, result, inputTotalSize)
+	})
+	t.Run("chunk querier", func(t *testing.T) {
+		querier, err := fanoutStorage.ChunkQuerier(0, 8000)
+		require.NoError(t, err)
+		defer querier.Close()
+
+		matcher, err := labels.NewMatcher(labels.MatchEqual, model.MetricNameLabel, "a")
+		require.NoError(t, err)
+
+		seriesSet := storage.NewSeriesSetFromChunkSeriesSet(querier.Select(ctx, true, nil, matcher))
+
+		result := make(map[int64]float64)
+		var labelsResult labels.Labels
+		var iterator chunkenc.Iterator
+		for seriesSet.Next() {
+			series := seriesSet.At()
+			seriesLabels := series.Labels()
+			labelsResult = seriesLabels
+			iterator := series.Iterator(iterator)
+			for iterator.Next() == chunkenc.ValFloat {
+				timestamp, value := iterator.At()
+				result[timestamp] = value
+			}
+		}
+
+		require.NoError(t, seriesSet.Err())
+		require.Equal(t, labelsResult, outputLabel)
+		require.Len(t, result, inputTotalSize)
+	})
+}
+
+func TestFanout_SelectSorted_AppenderV2(t *testing.T) {
+	inputLabel := labels.FromStrings(model.MetricNameLabel, "a")
+	outputLabel := labels.FromStrings(model.MetricNameLabel, "a")
+
+	inputTotalSize := 0
+
+	priStorage := teststorage.New(t)
+	app1 := priStorage.AppenderV2(t.Context())
+	_, err := app1.Append(0, inputLabel, 0, 0, 0, nil, nil, storage.AOptions{})
+	require.NoError(t, err)
+	inputTotalSize++
+	_, err = app1.Append(0, inputLabel, 0, 1000, 1, nil, nil, storage.AOptions{})
+	require.NoError(t, err)
+	inputTotalSize++
+	_, err = app1.Append(0, inputLabel, 0, 2000, 2, nil, nil, storage.AOptions{})
+	require.NoError(t, err)
+	inputTotalSize++
+	require.NoError(t, app1.Commit())
+
+	remoteStorage1 := teststorage.New(t)
+	app2 := remoteStorage1.AppenderV2(t.Context())
+	_, err = app2.Append(0, inputLabel, 0, 3000, 3, nil, nil, storage.AOptions{})
+	require.NoError(t, err)
+	inputTotalSize++
+	_, err = app2.Append(0, inputLabel, 0, 4000, 4, nil, nil, storage.AOptions{})
+	require.NoError(t, err)
+	inputTotalSize++
+	_, err = app2.Append(0, inputLabel, 0, 5000, 5, nil, nil, storage.AOptions{})
+	require.NoError(t, err)
+	inputTotalSize++
+	require.NoError(t, app2.Commit())
+
+	remoteStorage2 := teststorage.New(t)
+	app3 := remoteStorage2.AppenderV2(t.Context())
+	_, err = app3.Append(0, inputLabel, 0, 6000, 6, nil, nil, storage.AOptions{})
+	require.NoError(t, err)
+	inputTotalSize++
+	_, err = app3.Append(0, inputLabel, 0, 7000, 7, nil, nil, storage.AOptions{})
+	require.NoError(t, err)
+	inputTotalSize++
+	_, err = app3.Append(0, inputLabel, 0, 8000, 8, nil, nil, storage.AOptions{})
+	require.NoError(t, err)
+	inputTotalSize++
+
+	require.NoError(t, app3.Commit())
+
+	fanoutStorage := storage.NewFanout(nil, priStorage, remoteStorage1, remoteStorage2)
+
+	t.Run("querier", func(t *testing.T) {
+		querier, err := fanoutStorage.Querier(0, 8000)
+		require.NoError(t, err)
+		defer querier.Close()
+
+		matcher, err := labels.NewMatcher(labels.MatchEqual, model.MetricNameLabel, "a")
+		require.NoError(t, err)
+
+		seriesSet := querier.Select(t.Context(), true, nil, matcher)
+
+		result := make(map[int64]float64)
+		var labelsResult labels.Labels
+		var iterator chunkenc.Iterator
+		for seriesSet.Next() {
+			series := seriesSet.At()
+			seriesLabels := series.Labels()
+			labelsResult = seriesLabels
+			iterator := series.Iterator(iterator)
+			for iterator.Next() == chunkenc.ValFloat {
+				timestamp, value := iterator.At()
+				result[timestamp] = value
+			}
+		}
+
+		require.Equal(t, labelsResult, outputLabel)
+		require.Len(t, result, inputTotalSize)
+	})
+	t.Run("chunk querier", func(t *testing.T) {
+		querier, err := fanoutStorage.ChunkQuerier(0, 8000)
+		require.NoError(t, err)
+		defer querier.Close()
+
+		matcher, err := labels.NewMatcher(labels.MatchEqual, model.MetricNameLabel, "a")
+		require.NoError(t, err)
+
+		seriesSet := storage.NewSeriesSetFromChunkSeriesSet(querier.Select(t.Context(), true, nil, matcher))
+
+		result := make(map[int64]float64)
+		var labelsResult labels.Labels
+		var iterator chunkenc.Iterator
+		for seriesSet.Next() {
+			series := seriesSet.At()
+			seriesLabels := series.Labels()
+			labelsResult = seriesLabels
+			iterator := series.Iterator(iterator)
+			for iterator.Next() == chunkenc.ValFloat {
+				timestamp, value := iterator.At()
+				result[timestamp] = value
+			}
+		}
+
+		require.NoError(t, seriesSet.Err())
+		require.Equal(t, labelsResult, outputLabel)
+		require.Len(t, result, inputTotalSize)
+	})
+}
+
+func TestFanoutErrors(t *testing.T) {
+	workingStorage := teststorage.New(t)
+
+	cases := []struct {
+		primary   storage.Storage
+		secondary storage.Storage
+		warning   error
+		err       error
+	}{
+		{
+			primary:   workingStorage,
+			secondary: errStorage{},
+			warning:   errSelect,
+			err:       nil,
+		},
+		{
+			primary:   errStorage{},
+			secondary: workingStorage,
+			warning:   nil,
+			err:       errSelect,
+		},
+	}
+
+	for _, tc := range cases {
+		fanoutStorage := storage.NewFanout(nil, tc.primary, tc.secondary)
+
+		t.Run("samples", func(t *testing.T) {
+			querier, err := fanoutStorage.Querier(0, 8000)
+			require.NoError(t, err)
+			defer querier.Close()
+
+			matcher := labels.MustNewMatcher(labels.MatchEqual, "a", "b")
+			ss := querier.Select(context.Background(), true, nil, matcher)
+
+			// Exhaust.
+			for ss.Next() {
+				ss.At()
+			}
+
+			if tc.err != nil {
+				require.EqualError(t, ss.Err(), tc.err.Error())
+			}
+
+			if tc.warning != nil {
+				w := ss.Warnings()
+				require.NotEmpty(t, w, "warnings expected")
+				require.EqualError(t, w.AsErrors()[0], tc.warning.Error())
+			}
+		})
+		t.Run("chunks", func(t *testing.T) {
+			t.Skip("enable once TestStorage and TSDB implements ChunkQuerier")
+			querier, err := fanoutStorage.ChunkQuerier(0, 8000)
+			require.NoError(t, err)
+			defer querier.Close()
+
+			matcher := labels.MustNewMatcher(labels.MatchEqual, "a", "b")
+			ss := querier.Select(context.Background(), true, nil, matcher)
+
+			// Exhaust.
+			for ss.Next() {
+				ss.At()
+			}
+
+			if tc.err != nil {
+				require.EqualError(t, ss.Err(), tc.err.Error())
+			}
+
+			if tc.warning != nil {
+				w := ss.Warnings()
+				require.NotEmpty(t, w, "warnings expected")
+				require.EqualError(t, w.AsErrors()[0], tc.warning.Error())
+			}
+		})
 	}
 }
 
-func BenchmarkNoMergeSeriesSet_100_100(b *testing.B) {
-	seriesSet := makeSeriesSet(100, 100)
-	benchmarkDrain(seriesSet, b)
+var errSelect = errors.New("select error")
+
+type errStorage struct{}
+
+type errQuerier struct{}
+
+func (errStorage) Querier(_, _ int64) (storage.Querier, error) {
+	return errQuerier{}, nil
 }
 
-func BenchmarkMergeSeriesSet(b *testing.B) {
-	for _, bm := range []struct {
-		numSeriesSets, numSeries, numSamples int
-	}{
-		{1, 100, 100},
-		{10, 100, 100},
-		{100, 100, 100},
-	} {
-		seriesSet := makeMergeSeriesSet(bm.numSeriesSets, bm.numSeries, bm.numSamples)
-		b.Run(fmt.Sprintf("%d_%d_%d", bm.numSeriesSets, bm.numSeries, bm.numSamples), func(b *testing.B) {
-			benchmarkDrain(seriesSet, b)
+type errChunkQuerier struct{ errQuerier }
+
+func (errStorage) ChunkQuerier(_, _ int64) (storage.ChunkQuerier, error) {
+	return errChunkQuerier{}, nil
+}
+func (errStorage) Appender(context.Context) storage.Appender     { return nil }
+func (errStorage) AppenderV2(context.Context) storage.AppenderV2 { return nil }
+func (errStorage) StartTime() (int64, error)                     { return 0, nil }
+func (errStorage) Close() error                                  { return nil }
+
+func (errQuerier) Select(context.Context, bool, *storage.SelectHints, ...*labels.Matcher) storage.SeriesSet {
+	return storage.ErrSeriesSet(errSelect)
+}
+
+func (errQuerier) LabelValues(context.Context, string, *storage.LabelHints, ...*labels.Matcher) ([]string, annotations.Annotations, error) {
+	return nil, nil, errors.New("label values error")
+}
+
+func (errQuerier) LabelNames(context.Context, *storage.LabelHints, ...*labels.Matcher) ([]string, annotations.Annotations, error) {
+	return nil, nil, errors.New("label names error")
+}
+
+func (errQuerier) Close() error { return nil }
+
+func (errChunkQuerier) Select(context.Context, bool, *storage.SelectHints, ...*labels.Matcher) storage.ChunkSeriesSet {
+	return storage.ErrChunkSeriesSet(errSelect)
+}
+
+type mockStorage struct {
+	app   storage.Appendable
+	appV2 storage.AppendableV2
+	storage.Storage
+}
+
+func (m mockStorage) Appender(ctx context.Context) storage.Appender {
+	return m.app.Appender(ctx)
+}
+
+func (m mockStorage) AppenderV2(ctx context.Context) storage.AppenderV2 {
+	return m.appV2.AppenderV2(ctx)
+}
+
+type sample = teststorage.Sample
+
+func withoutExemplars(s []sample) (ret []sample) {
+	ret = make([]sample, len(s))
+	copy(ret, s)
+	for i := range ret {
+		ret[i].ES = nil
+	}
+	return ret
+}
+
+type fanoutAppenderTestCase struct {
+	name      string
+	primary   *teststorage.Appendable
+	secondary *teststorage.Appendable
+
+	expectAppendErr     bool
+	expectExemplarError bool
+	expectCommitError   bool
+
+	expectPrimarySamples   []sample
+	expectSecondarySamples []sample
+}
+
+func fanoutAppenderTestCases(expected []sample) []fanoutAppenderTestCase {
+	appErr := errors.New("append test error")
+	exErr := errors.New("exemplar test error")
+	commitErr := errors.New("commit test error")
+
+	return []fanoutAppenderTestCase{
+		{
+			name:      "both works",
+			primary:   teststorage.NewAppendable(),
+			secondary: teststorage.NewAppendable(),
+
+			expectPrimarySamples:   expected,
+			expectSecondarySamples: expected,
+		},
+		{
+			name:      "primary errors",
+			primary:   teststorage.NewAppendable().WithErrs(func(labels.Labels) error { return appErr }, exErr, commitErr),
+			secondary: teststorage.NewAppendable(),
+
+			expectAppendErr:     true,
+			expectExemplarError: true,
+			expectCommitError:   true,
+		},
+		{
+			name:      "exemplar errors",
+			primary:   teststorage.NewAppendable().WithErrs(func(labels.Labels) error { return nil }, exErr, nil),
+			secondary: teststorage.NewAppendable().WithErrs(func(labels.Labels) error { return nil }, exErr, nil),
+
+			expectAppendErr:     false,
+			expectExemplarError: true,
+			expectCommitError:   false,
+
+			expectPrimarySamples:   withoutExemplars(expected),
+			expectSecondarySamples: withoutExemplars(expected),
+		},
+		{
+			name:      "secondary errors",
+			primary:   teststorage.NewAppendable(),
+			secondary: teststorage.NewAppendable().WithErrs(func(labels.Labels) error { return appErr }, exErr, commitErr),
+
+			expectAppendErr:     true,
+			expectExemplarError: true,
+			expectCommitError:   true,
+
+			expectPrimarySamples: expected,
+		},
+	}
+}
+
+func TestFanoutAppender(t *testing.T) {
+	h := tsdbutil.GenerateTestHistogram(0)
+	fh := tsdbutil.GenerateTestFloatHistogram(0)
+	ex := exemplar.Exemplar{Value: 1}
+
+	expected := []sample{
+		{L: labels.FromStrings(model.MetricNameLabel, "metric1"), V: 1, ES: []exemplar.Exemplar{ex}},
+		{L: labels.FromStrings(model.MetricNameLabel, "metric2"), T: 1, H: h},
+		{L: labels.FromStrings(model.MetricNameLabel, "metric3"), T: 2, FH: fh},
+	}
+	for _, tt := range fanoutAppenderTestCases(expected) {
+		t.Run(tt.name, func(t *testing.T) {
+			f := storage.NewFanout(nil, mockStorage{app: tt.primary}, mockStorage{app: tt.secondary})
+
+			app := f.Appender(t.Context())
+			ref, err := app.Append(0, labels.FromStrings(model.MetricNameLabel, "metric1"), 0, 1)
+			if tt.expectAppendErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			_, err = app.AppendExemplar(ref, labels.FromStrings(model.MetricNameLabel, "metric1"), ex)
+			if tt.expectExemplarError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			_, err = app.AppendHistogram(0, labels.FromStrings(model.MetricNameLabel, "metric2"), 1, h, nil)
+			if tt.expectAppendErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			_, err = app.AppendHistogram(0, labels.FromStrings(model.MetricNameLabel, "metric3"), 2, nil, fh)
+			if tt.expectAppendErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			err = app.Commit()
+			if tt.expectCommitError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			require.Nil(t, tt.primary.PendingSamples())
+			testutil.RequireEqual(t, tt.expectPrimarySamples, tt.primary.ResultSamples())
+			require.Nil(t, tt.primary.RolledbackSamples())
+
+			require.Nil(t, tt.secondary.PendingSamples())
+			testutil.RequireEqual(t, tt.expectSecondarySamples, tt.secondary.ResultSamples())
+			require.Nil(t, tt.secondary.RolledbackSamples())
+		})
+	}
+}
+
+func TestFanoutAppenderV2(t *testing.T) {
+	h := tsdbutil.GenerateTestHistogram(0)
+	fh := tsdbutil.GenerateTestFloatHistogram(0)
+	ex := exemplar.Exemplar{Value: 1}
+
+	expected := []sample{
+		{L: labels.FromStrings(model.MetricNameLabel, "metric1"), ST: -1, V: 1, ES: []exemplar.Exemplar{ex}},
+		{L: labels.FromStrings(model.MetricNameLabel, "metric2"), ST: -2, T: 1, H: h},
+		{L: labels.FromStrings(model.MetricNameLabel, "metric3"), ST: -3, T: 2, FH: fh},
+	}
+
+	for _, tt := range fanoutAppenderTestCases(expected) {
+		t.Run(tt.name, func(t *testing.T) {
+			f := storage.NewFanout(nil, mockStorage{appV2: tt.primary}, mockStorage{appV2: tt.secondary})
+
+			app := f.AppenderV2(t.Context())
+			_, err := app.Append(0, labels.FromStrings(model.MetricNameLabel, "metric1"), -1, 0, 1, nil, nil, storage.AOptions{
+				Exemplars: []exemplar.Exemplar{ex},
+			})
+			switch {
+			case tt.expectAppendErr:
+				require.Error(t, err)
+			case tt.expectExemplarError:
+				var pErr *storage.AppendPartialError
+				require.ErrorAs(t, err, &pErr)
+				// One for primary, one for secondary.
+				// This is because in V2 flow we must append sample even when first append partially failed with exemplars.
+				// Filtering out exemplars is neither feasible, nor important.
+				require.Len(t, pErr.ExemplarErrors, 2)
+			default:
+				require.NoError(t, err)
+			}
+
+			_, err = app.Append(0, labels.FromStrings(model.MetricNameLabel, "metric2"), -2, 1, 0, h, nil, storage.AOptions{})
+			if tt.expectAppendErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			_, err = app.Append(0, labels.FromStrings(model.MetricNameLabel, "metric3"), -3, 2, 0, nil, fh, storage.AOptions{})
+			if tt.expectAppendErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			err = app.Commit()
+			if tt.expectCommitError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			require.Nil(t, tt.primary.PendingSamples())
+			testutil.RequireEqual(t, tt.expectPrimarySamples, tt.primary.ResultSamples())
+			require.Nil(t, tt.primary.RolledbackSamples())
+
+			require.Nil(t, tt.secondary.PendingSamples())
+			testutil.RequireEqual(t, tt.expectSecondarySamples, tt.secondary.ResultSamples())
+			require.Nil(t, tt.secondary.RolledbackSamples())
+		})
+	}
+}
+
+// Recommended CLI invocation:
+/*
+	export bench=fanoutAppender && go test ./storage/... \
+		-run '^$' -bench '^BenchmarkFanoutAppenderV2' \
+		-benchtime 2s -count 6 -cpu 2 -timeout 999m \
+		| tee ${bench}.txt
+*/
+func BenchmarkFanoutAppenderV2(b *testing.B) {
+	ex := []exemplar.Exemplar{{Value: 1}}
+
+	var series []labels.Labels
+	for i := range 1000 {
+		series = append(series, labels.FromStrings(model.MetricNameLabel, "metric1", "i", strconv.Itoa(i)))
+	}
+	for _, tt := range fanoutAppenderTestCases(nil) {
+		// Turn our mock appender into ~noop for no allocs.
+		tt.primary.SkipRecording(true)
+		tt.secondary.SkipRecording(true)
+
+		b.Run(tt.name, func(b *testing.B) {
+			f := storage.NewFanout(nil, mockStorage{appV2: tt.primary}, mockStorage{appV2: tt.secondary})
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				app := f.AppenderV2(b.Context())
+				for _, s := range series {
+					// Purposefully skip errors as we want to benchmark error cases too (majority of the fanout logic).
+					_, _ = app.Append(0, s, 0, 0, 1, nil, nil, storage.AOptions{
+						Exemplars: ex,
+					})
+				}
+				require.NoError(b, app.Rollback())
+			}
 		})
 	}
 }

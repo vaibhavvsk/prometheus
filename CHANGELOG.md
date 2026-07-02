@@ -1,3 +1,1893 @@
+# Changelog
+
+## 3.13.0 / 2026-07-01
+
+- [SECURITY] UI: Bump `sanitize-html` to fix a cross-site scripting vulnerability (CVE-2026-44990). #18697
+- [CHANGE] UI: Third-party npm dependency licenses are now embedded in the Prometheus binary and served at `/assets/third-party-licenses.txt`, replacing the `npm_licenses.tar.bz2` archive previously shipped in release tarballs and container images. #18997
+- [CHANGE] API: Use SHA-256 instead of SHA-1 to generate rule group pagination tokens. #18927
+- [CHANGE] HTTP clients: Credentials (Authorization header, basic auth, bearer token, OAuth2, configured headers) are no longer forwarded when following a redirect to a different host; affects scraping, remote read/write, alerting, and service discovery. Via prometheus/common v0.69.0 (CVE-2025-4673 CVE-2023-45289). #18949
+- [CHANGE] promtool: Relative file paths in the file passed to `--http.config.file` are now resolved relative to that config file's directory instead of its parent directory. Via prometheus/common v0.69.0. #18949
+- [CHANGE] PromQL: Rename the `min()` and `max()` duration-expression functions (experimental feature flag `experimental-duration-expr`) to `min_of()` and `max_of()` to avoid confusion with the `min` and `max` aggregate operators. #18687
+- [FEATURE] API: Add experimental search endpoints to search metric names, label names, and label values. #18573
+- [FEATURE] Discovery/AWS: Add ability to filter RDS instances. #18859
+- [FEATURE] PromQL: Add `min_of(a, b)` and `max_of(a, b)` scalar experimental functions, returning the smaller or larger of two scalar values. #18687
+- [FEATURE] PromQL: Add support for smoothed/anchored rate with native histograms. #18564
+- [FEATURE] PromQL: Expose per-query `samplesRead` (and `samplesReadPerStep` with `stats=all` and the `promql-per-step-stats` feature flag) in the query stats response, and add the `prometheus_engine_query_samples_read_total` engine counter. `samplesRead` reflects storage I/O distinct from `totalQueryableSamples`, which counts samples loaded into the evaluator (and so over-counts when a sample is reused across multiple range-vector windows). #18081
+- [FEATURE] Scrape: Add `__convert_classic_histograms_to_nhcb__` internal label to allow per-target override of `convert_classic_histograms_to_nhcb` scrape configuration via relabeling. #18840
+- [FEATURE] TSDB: Add `storage.tsdb.chunk_encoding.floats` configuration field to select float chunk encoding (`xor` or `xor2`) at runtime, independently of the `--enable-feature=xor2-encoding` flag. #18769
+- [FEATURE] remote_write: Add Certificate support for ingesting data into an Azure Monitor Workspace. #18217
+- [FEATURE] Scrape: Add `__always_scrape_classic_histograms__` and `__scrape_native_histograms__` internal labels to allow per-target override of the `always_scrape_classic_histograms` and `scrape_native_histograms` scrape configuration via relabeling. #18929
+- [ENHANCEMENT] Release: Container images are now also published to the GitHub Container Registry (ghcr.io). #18791
+- [ENHANCEMENT] PromQL: Prettify `fill_left(x) fill_right(x)` as `fill(x)` when both fill values are equal. #18851
+- [ENHANCEMENT] UI: Improve autocompletion after closing a function bracket. #18894
+- [PERF] Labels: Add case-insensitive prefix matching to speed up evaluation of long case-insensitive regular expressions (up to ~2x faster). #18540
+- [PERF] TSDB: Reduce per-sample overhead in chunk population, speeding up affected queries by ~12-15% in benchmarks. #18699
+- [PERF] TSDB: Eliminate unnecessary heap allocations in the V2 histogram WAL decoder, reducing allocations by up to 50% and memory by up to 10% for deployments using native histograms with created-timestamp storage enabled (`--enable-feature=created-timestamp-zero-ingestion`). #18813
+- [BUGFIX] Discovery/AWS: Fix failure when processing an AWS RDS cluster without instances. #18845
+- [BUGFIX] Fix race condition in initTime that could cause ErrOutOfBounds. #18629
+- [BUGFIX] PromQL: A range query whose `end` was not aligned to `step` caused subqueries inside it to evaluate past the parent's last actual step, inflating `peakSamples` in the query stats and against the `query.max-samples` limit, and wasting storage I/O reading samples that were never used in the result. #18081
+- [BUGFIX] PromQL: A range query containing an at-modifier-unsafe function over a range-vector with an `@` modifier (e.g. `predict_linear(metric[60s] @ T, X)`) silently under-counted `totalQueryableSamples` for steps after step 0. #18081
+- [BUGFIX] PromQL: Fix `fill_left`/`fill_right` producing missing samples in range queries when using `group_left`/`group_right`. #18850
+- [BUGFIX] PromQL: Fix for resets() and changes() in anchored range extenders with histograms. #18906
+- [BUGFIX] PromQL: Fix panic on `1[5m] smoothed` and similar expressions when extended range selectors are enabled. #18764
+- [BUGFIX] PromQL: Fix panic when a `smoothed` instant vector selector produces no samples for a series. #18943
+- [BUGFIX] PromQL: Fix panic when using a parenthesised plain number as an offset (e.g. `foo offset -(5)`). #18768
+- [BUGFIX] promtool: Fix panic when parsing exposition text containing empty braces `{}`. Via prometheus/common v0.69.0. #18949
+- [BUGFIX] Promtool: Fix `check healthy` and `check ready` when `--url` ends with a trailing slash. #18854
+- [BUGFIX] Rules: Close PromQL query after each rule evaluation to ensure resources are released. #18733
+- [BUGFIX] Scaleway SD: Resolve VPC/IPAM-only instances that have no legacy `private_ip` or `public_ip` field, but do have private NICs attached. #18772
+- [BUGFIX] TSDB: Do not leak head series when an integer histogram append is rejected (e.g. out-of-order). #18838
+- [BUGFIX] UI: Escape label values offered by PromQL autocomplete. #18658
+- [BUGFIX] TSDB: Fix chunk snapshot encoding for EncXOR2 chunks, preventing corruption on TSDB restart when EncXOR2-encoded series were present. #18739
+- [BUGFIX] TSDB: Store a millisecond timestamp (not a WAL segment number) in walExpiries when a series is evicted via CompactStaleHead/CompactSelectedSeries, so the series's label record is correctly retained in the next WAL checkpoint and replays cleanly. #18847
+- [BUGFIX] TSDB: Prevent loss of samples at the chunk-range boundary when CompactSelectedSeries (and CompactStaleHead) evict the series — the per-slice compaction loop now runs one more iteration so the boundary timestamp is captured in a block before the in-memory copy is removed. #18849
+
+## 3.12.0 / 2026-05-28
+
+- [SECURITY] Remote-write: Reject snappy-compressed requests whose declared decoded length exceeds the 32MB. Thanks to @hibrian827 for reporting it. #18642
+- [SECURITY] STACKIT SD: Fix secrets being exposed in plaintext via `/-/config` endpoint. Thanks to @August829 and @Phaxma for reporting. GHSA-39j6-789q-qxvh #18649
+- [CHANGE] TSDB/Agent: Adds Start Timestamp field to all WAL Histogram samples in memory; used `st-storage` flag is enabled. #18221
+- [FEATURE] API: Add `/api/v1/status/self_metrics` endpoint returning the current state of the Prometheus server's own metrics about itself as JSON. #18411
+- [FEATURE] Discovery: Add DigitalOcean Managed Databases service discovery #18287
+- [FEATURE] Prometheus: Add support for the aix/ppc64 compilation target #18321
+- [FEATURE] Discovery: Add Outscale VM service discovery (`outscale_sd_configs`) for discovering scrape targets from the Outscale Cloud API. #18139
+- [FEATURE] PromQL: Emit a warning when `sort`, `sort_by_label` or `sort_by_label_desc` is used within range (matrix) queries, as these functions do not have effect in that context. #18498
+- [FEATURE] PromQL: Add `start()`, `end()`, `range()`, and `step()` experimental functions #17877
+- [FEATURE] PromQL: Update `resets()` function to consider start timestamp resets. Hidden behind `use-start-timestamps` feature flag. #18627
+- [FEATURE] Prometheus: Promote auto-reload-config as stable #18620
+- [FEATURE] TSDB/Agent: Add `CheckpointFromInMemorySeries` option to `agent.DB` that enables checkpoint based on in-memory series. #17948
+- [FEATURE] UI: Add a web interface for deleting time series and cleaning tombstones, accessible from the Status menu. #18390
+- [FEATURE] PromQL: Use start timestamps for `rate()`, `irate(), and `increase()` calculations, behind a feature flag `use-start-timestamps`. Doesn't work together with extended range selectors `anchored` and `smoothed`. #18344
+- [FEATURE] Scrape: Added a feature flag `st-synthesis` which synthesizes unknown STs for scraped cumulative metrics. Useful when Remote Writing 2.0 with delta or Otel-based backends. #18279
+- [FEATURE] promqltest: support `@st` annotation in `load` blocks to specify per-sample start timestamps. #18360
+- [ENHANCEMENT] API: reject concurrent fgprof profiles. #18651
+- [ENHANCEMENT] AWS SD: Add optional `external_id` field to ECS/MSK/RDS/Elasticache. #18579
+- [ENHANCEMENT] AWS SD: Add optional `external_id` field. #17171
+- [ENHANCEMENT] Discovery: Propagate SD target updates faster by introducing dynamic backoff interval instead of static 5s interval for throttling. #18187
+- [ENHANCEMENT] Promtool: Add `--header` flag to `query instant` command, matching existing `query range` behaviour. #18418
+- [ENHANCEMENT]: AWS SD: Allows EC2 service discovery to discover IPv6 addresses to communicate with target endpoints. The private IPv4 address remains the default when both IPv4 and IPv6 addresses are present. #16088
+- [PERF] TSDB: Make head chunk lookup in range queries constant time instead of quadratic time #18302
+- [PERF] TSDB: Skip entire stripes in mmapHeadChunks when no series need mmapping, reducing CPU utilization significantly at production-relevant scales. #18541
+- [PERF] TSDB: Skip clean series during periodic head chunk mmap using cached head chunk count #18272
+- [PERF] PromQL: Address FloatHistogram.KahanAdd performance regression on Go 1.26. #18568
+- [BUGFIX] PromQL: Fix `info()` function incorrectly handling negated `__name__` matchers #17932
+- [BUGFIX] API: Return duration expressions in `/parse_ast`. #18624
+- [BUGFIX] API: correctly document formats accepted for duration query request parameters (step, timeout and lookback delta) in OpenAPI spec #18305
+- [BUGFIX] Scrape: AppenderV2 now tracks staleness even when OOO/duplicate series errors happen similar to AppenderV1 #18567
+- [BUGFIX] Config: Validate remote_write queue_config fields at load time to prevent runtime panic and silent misconfiguration. #18209
+- [BUGFIX] Discovery/Consul: Add `health_filter` for Health API filtering, fixing breakage when using Catalog-only fields like `ServiceTags` in `filter`. #18479 #18499
+- [BUGFIX] OTLP: limit decompressed body size for gzip-encoded OTLP write requests. #18408
+- [BUGFIX] PromQL: Fix `smoothed` rate/increase returning zero instead of no result when all data falls strictly after the query range. #18523
+- [BUGFIX] PromQL: Fix metric name not being dropped when last_over_time or first_over_time is applied to subqueries containing name-dropping functions like abs(). #18409
+- [BUGFIX] PromQL: Fix missing warning when mixing exponential and custom-bucket histograms in stats queries. #18660
+- [BUGFIX] PromQL: Fix parsing of `range()` keyword in duration expressions such as `foo[5m+range()]`. #18623
+- [BUGFIX] PromQL: Fix smoothed vector selector returning no results in binary operations when the `@` modifier is used. #18531
+- [BUGFIX] PromQL: Reject NaN, infinite, and out-of-range duration expressions instead of silently producing an out-of-range time.Duration. #18639
+- [BUGFIX] Scrape: Fix panic when scraping malformed native histograms. #18414
+- [BUGFIX] Scrape: fix panic when scraping a target exposing a summary with no quantiles via the protobuf format. #18382
+- [BUGFIX] Scrape: fix scrape failure log file occasionally not applied after a configuration reload. #18421
+- [BUGFIX] TSDB: Allow retention percentage with new data path. #18628
+- [BUGFIX] TSDB: Preserve decimal precision in percentage-based retention #18374
+- [BUGFIX] TSDB: fix prometheus_tsdb_head_chunks going negative after WAL replay #18401
+- [BUGFIX] TSDB: panic with native histograms during query of overlapping chunks. #18692
+- [BUGFIX] Tracing: fix startup failure for insecure OTLP HTTP tracing #18469
+- [BUGFIX] UI: Escape label values offered by PromQL autocomplete. #18658
+- [BUGFIX] UI: Improve Y-axis tick label precision for graph values over small ranges. #18682
+- [BUGFIX] `prometheus_sd_refresh*` and `prometheus_sd_discovered_targets` metrics for specific scrape jobs are deleted when the scrape job is removed. #17614
+- [BUGFIX] Remote: fixed validation for received RW2 requests when parsing metadata unit symbols. This fixes a case when request would cause (recovered) handler panic. #18641
+- [BUGFIX] TSDB/Agent: fix race in agent appender where concurrent appends for the same label set could produce duplicate in-memory series and duplicate WAL records. #18292
+- [BUGFIX] Config: Update `--enable-feature`  flag description and sort feature names. #18487
+
+## 3.11.3 / 2026-04-27
+
+This release fixes mutiple security issues.
+
+We would like to thank the following people for the responsible disclosures:
+- Shadowbyte (4c1dr3aper) - Charlie Lewis for the Remote-Read snappy decode vulnerability.
+- Brett Gervasoni for the AzureAD OAuth `client_secret` vulnerability.
+- @iiihaiii and @Ngocnn97 for the Old UI XSS vulnerability. 
+
+- [SECURITY] AzureAD remote write: Fix OAuth `client_secret` being exposed in plaintext via `/-/config` endpoint. GHSA-wg65-39gg-5wfj / CVE-2026-42151 #18590
+- [SECURITY] Remote-read: Reject snappy-compressed requests whose declared decoded length exceeds the decode limit. GHSA-8rm2-7qqf-34qm / CVE-2026-42154 #18584
+- [SECURITY] UI: Fix stored XSS via unescaped `le` label values in old UI heatmap chart tick labels. GHSA-fw8g-cg8f-9j28 #18588
+
+## 3.11.2 / 2026-04-13
+
+This release has a fix for a Stored XSS vulnerability that can be triggered via crafted metric names and label values in Prometheus web UI tooltips and metrics explorer. Thanks to Duc Anh Nguyen from TinyxLab for reporting it.
+
+- [SECURITY] UI: Fix stored XSS via unescaped metric names and labels. CVE-2026-40179. #18506
+- [ENHANCEMENT] Consul SD: Introduce `health_filter` field for Health API filtering. #18499
+- [BUGFIX] Consul SD: Fix filter parameter being incorrectly applied to the Health API. #18499
+
+## 3.11.1 / 2026-04-07
+
+- [BUGFIX] Tracing: Fix startup failure for OTLP HTTP tracing with `insecure: true`. #18469
+
+## 3.11.0 / 2026-04-02
+
+- [CHANGE] Hetzner SD: The `__meta_hetzner_datacenter` label is deprecated for the role `robot` but kept for backward compatibility, use the `__meta_hetzner_robot_datacenter` label instead. For the role `hcloud`, the label is deprecated and will stop working after the 1 July 2026. #17850
+- [CHANGE] Hetzner SD: The `__meta_hetzner_hcloud_datacenter_location` and `__meta_hetzner_hcloud_datacenter_location_network_zone` labels are deprecated, use the `__meta_hetzner_hcloud_location` and `__meta_hetzner_hcloud_location_network_zone` labels instead. #17850
+- [CHANGE] Promtool: Redirect debug output to stderr to avoid interfering with stdout-based tool output. #18346
+- [FEATURE] AWS SD: Add Elasticache Role. #18099
+- [FEATURE] AWS SD: Add RDS Role. #18206
+- [FEATURE] Azure SD: Add support for Azure Workload Identity authentication method. #17207
+- [FEATURE] Discovery: Introduce `prometheus_sd_last_update_timestamp_seconds` metric to track the last time a service discovery update was sent to consumers. #18194
+- [FEATURE] Kubernetes SD: Add support for node role selectors for pod roles. #18006
+- [FEATURE] Kubernetes SD: Introduce pod-based labels for deployment, cronjob, and job controller names: `__meta_kubernetes_pod_deployment_name`, `__meta_kubernetes_pod_cronjob_name` and `__meta_kubernetes_pod_job_name`, respectively. #17774
+- [FEATURE] PromQL: Add `</` and `>/` operators for trimming observations from native histograms. #17904
+- [FEATURE] PromQL: Add experimental `histogram_quantiles` variadic function for computing multiple quantiles at once. #17285
+- [FEATURE] TSDB: Add `storage.tsdb.retention.percentage` configuration to configure the maximum percent of disk usable for TSDB storage. #18080
+- [FEATURE] TSDB: Add an experimental `fast-startup` feature flag that writes a `series_state.json` file to the WAL directory to track active series state across restarts. #18303
+- [FEATURE] TSDB: Add an experimental `st-storage` feature flag. When enabled, Prometheus stores ingested start timestamps (ST, previously called Created Timestamp) from scrape or OTLP in the TSDB and Agent WAL, and exposes them via Remote Write 2. #18062
+- [FEATURE] TSDB: Add an experimental `xor2-encoding` feature flag for the new TSDB block float sample chunk encoding that is optimized for scraped data and allows encoding start timestamps. #18062
+- [ENHANCEMENT] HTTP client: Add AWS `external_id` support for sigv4. #17916
+- [ENHANCEMENT] Kubernetes SD: Deduplicate deprecation warning logs from the Kubernetes API to reduce noise. #17829
+- [ENHANCEMENT] TSDB: Remove old temporary checkpoints when creating a Checkpoint. #17598
+- [ENHANCEMENT] UI: Add autocomplete support for experimental `first_over_time` and `ts_of_first_over_time` PromQL functions. #18318
+- [ENHANCEMENT] Vultr SD: Upgrade govultr library from v2 to v3 for continued security patches and maintenance. #18347
+- [PERF] PromQL: Improve performance and reduce heap allocations in joins (VectorBinop)/And/Or/Unless. #17159
+- [PERF] PromQL: Partially address performance regression in native histogram aggregations due to using `KahanAdd`. #18252
+- [PERF] Remote write: Optimize WAL watching used for RW sending to reuse internal buffers. #18250
+- [PERF] TSDB: Optimize LabelValues intersection performance for matchers. #18069
+- [PERF] UI: Skip restacking on hover in stacked series charts. #18230
+- [BUGFIX] AWS SD: Fix EC2 SD ignoring the configured `endpoint` option, a regression from the AWS SDK v2 migration. #18133
+- [BUGFIX] AWS SD: Fix panic in EC2 SD when DescribeAvailabilityZones returns nil ZoneName or ZoneId. #18133
+- [BUGFIX] Agent: Fix memory leak caused by duplicate SeriesRefs being loaded as active series. #17538
+- [BUGFIX] Alerting: Fix alert state incorrectly resetting to pending when the FOR period is increased in the config file. #18244
+- [BUGFIX] Azure SD: Fix system-assigned managed identity not working when `client_id` is empty. #18323
+- [BUGFIX] Consul SD: Fix filter parameter not being applied to health service endpoint, causing Node and Node.Meta filters to be ignored. #17349
+- [BUGFIX] Kubernetes SD: Fix duplicate targets generated by `*DualStack` EndpointSlices policies. #18192
+- [BUGFIX] OTLP: Fix ErrTooOldSample being returned as HTTP 500 instead of 400 in PRW v2 histogram write paths, preventing infinite client retry loops. #18084
+- [BUGFIX] OTLP: Fix exemplars getting mixed between incorrect parts of a histogram. #18056
+- [BUGFIX] PromQL: Do not skip histogram buckets in queries where histogram trimming is used. #18263
+- [BUGFIX] Remote write: Fix `prometheus_remote_storage_sent_batch_duration_seconds` measuring before the request was sent. #18214
+- [BUGFIX] Rules: Fix alert state restoration when rule labels contain Go template expressions. #18375
+- [BUGFIX] Scrape: Fix panic when parsing bare label names without an equal sign in brace-only metric notation. #18229
+- [BUGFIX] TSDB: Fail early when `use-uncached-io` feature flag is set on unsupported environments. #18219
+- [BUGFIX] TSDB: Fall back to CLI flag values when retention is removed from config file. #18200
+- [BUGFIX] TSDB: Fix memory leaks in buffer pools by clearing reference fields before returning buffers to pools. #17895
+- [BUGFIX] TSDB: Fix missing mmap of histogram chunks during WAL replay. #18306
+- [BUGFIX] TSDB: Fix storage.tsdb.retention.time unit mismatch in file causing retention to be 1e6 times longer than configured. #18200
+- [BUGFIX] Tracing: Fix missing traceID in query log when tracing is enabled, previously only spanID was emitted. #18189
+- [BUGFIX] UI: Fix tooltip Y-offset drift when using multiple graph panels. #18228
+- [BUGFIX] UI: Update retention display in runtime info when config is reloaded. #18200
+
+## 3.10.0 / 2026-02-24
+
+Prometheus now offers a distroless Docker image variant alongside the default
+busybox image. The distroless variant provides enhanced security with a minimal
+base image, uses UID/GID 65532 (nonroot) instead of nobody, and removes the
+VOLUME declaration. Both variants are available with `-busybox` and `-distroless`
+tag suffixes (e.g., `prom/prometheus:latest-busybox`, `prom/prometheus:latest-distroless`).
+The busybox image remains the default with no suffix for backwards compatibility
+(e.g., `prom/prometheus:latest` points to the busybox variant).
+
+For users migrating existing **named** volumes from the busybox image to the distroless variant, the ownership can be adjusted with:
+```
+docker run --rm -v prometheus-data:/prometheus alpine chown -R 65532:65532 /prometheus
+```
+Then, the container can be started with the old volume with:
+```
+docker run -v prometheus-data:/prometheus prom/prometheus:latest-distroless
+```
+User migrating from bind mounts might need to ajust permissions too, depending on their setup.
+
+- [CHANGE] Alerting: Add `alertmanager` dimension to following metrics: `prometheus_notifications_dropped_total`, `prometheus_notifications_queue_capacity`, `prometheus_notifications_queue_length`. #16355
+- [CHANGE] UI: Hide expanded alert annotations by default, enabling more information density on the `/alerts` page. #17611
+- [FEATURE] AWS SD: Add MSK Role. #17600
+- [FEATURE] PromQL: Add `fill()` / `fill_left()` / `fill_right()` binop modifiers for specifying default values for missing series. #17644
+- [FEATURE] Web: Add OpenAPI 3.2 specification for the HTTP API at `/api/v1/openapi.yaml`. #17825
+- [FEATURE] Dockerfile: Add distroless image variant using UID/GID 65532 and no VOLUME declaration. Busybox image remains default. #17876
+- [FEATURE] Web: Add on-demand wall time profiling under `<URL>/debug/pprof/fgprof`. #18027
+- [ENHANCEMENT] PromQL: Add more detail to histogram quantile monotonicity info annotations. #15578
+- [ENHANCEMENT] Alerting: Independent alertmanager sendloops. #16355
+- [ENHANCEMENT] TSDB: Experimental support for early compaction of stale series in the memory with configurable threshold `stale_series_compaction_threshold` in the config file. #16929
+- [ENHANCEMENT] Service Discovery: Service discoveries are now removable from the Prometheus binary through the Go build tag `remove_all_sd` and individual service discoveries can be re-added with the build tags `enable_<sd name>_sd`. Users can build a custom Prometheus with only the necessary SDs for a smaller binary size. #17736
+- [ENHANCEMENT] Promtool: Support promql syntax features `promql-duration-expr` and `promql-extended-range-selectors`. #17926
+- [PERF] PromQL: Avoid unnecessary label extraction in PromQL functions. #17676
+- [PERF] PromQL: Improve performance of regex matchers like `.*-.*-.*`. #17707
+- [PERF] OTLP: Add label caching for OTLP-to-Prometheus conversion to reduce allocations and improve latency. #17860
+- [PERF] API: Compute `/api/v1/targets/relabel_steps` in a single pass instead of re-running relabeling for each prefix. #17969
+- [PERF] tsdb: Optimize LabelValues intersection performance for matchers. #18069
+- [BUGFIX] PromQL: Prevent query strings containing only UTF-8 continuation bytes from crashing Prometheus. #17735
+- [BUGFIX] Web: Fix missing `X-Prometheus-Stopping` header for `/-/ready` endpoint in `NotReady` state. #17795
+- [BUGFIX] PromQL: Fix PromQL `info()` function returning empty results when filtering by a label that exists on both the input metric and `target_info`. #17817
+- [BUGFIX] TSDB: Fix a bug during exemplar buffer grow/shrink that could cause exemplars to be incorrectly discarded. #17863
+- [BUGFIX] UI: Fix broken graph display after page reload, due to broken Y axis min encoding/decoding. #17869
+- [BUGFIX] TSDB: Fix memory leaks in buffer pools by clearing reference fields (Labels, Histogram pointers, metadata strings) before returning buffers to pools. #17879
+- [BUGFIX] PromQL: info function: fix series without identifying labels not being returned. #17898
+- [BUGFIX] OTLP: Filter `__name__` from OTLP attributes to prevent duplicate labels. #17917
+- [BUGFIX] TSDB: Fix division by zero when computing stale series ratio with empty head. #17952
+- [BUGFIX] OTLP: Fix potential silent data loss for sum metrics. #17954
+- [BUGFIX] PromQL: Fix smoothed interpolation across counter resets. #17988
+- [BUGFIX] PromQL: Fix panic with `@` modifier on empty ranges. #18020
+- [BUGFIX] PromQL: Fix `avg_over_time` for a single native histogram. #18058
+
+## 3.9.1 / 2026-01-07
+
+ - [BUGFIX] Agent: fix crash shortly after startup from invalid type of object. #17802
+ - [BUGFIX] Scraping: fix relabel keep/drop not working. #17807
+
+## 3.9.0 / 2026-01-06
+
+- [CHANGE] Native Histograms are no longer experimental! Make the `native-histogram` feature flag a no-op. Use `scrape_native_histograms` config option instead. #17528
+- [CHANGE] API: Add maximum limit of 10,000 sets of statistics to TSDB status endpoint. #17647
+- [FEATURE] API: Add /api/v1/features for clients to understand which features are supported. #17427
+- [FEATURE] Promtool: Add `start_timestamp` field for unit tests. #17636
+- [FEATURE] Promtool: Add `--format seriesjson` option to `tsdb dump` to output just series labels in JSON format. #13409
+- [FEATURE] Add `--storage.tsdb.delay-compact-file.path` flag for better interoperability with Thanos. #17435
+- [FEATURE] UI: Add an option on the query drop-down menu to duplicate that query panel. #17714
+- [ENHANCEMENT]: TSDB: add flag `--storage.tsdb.block-reload-interval` to configure TSDB Block Reload Interval. #16728
+- [ENHANCEMENT] UI: Add graph option to start the chart's Y axis at zero. #17565
+- [ENHANCEMENT] Scraping: Classic protobuf format no longer requires the unit in the metric name. #16834
+- [ENHANCEMENT] PromQL, Rules, SD, Scraping: Add native histograms to complement existing summaries. #17374
+- [ENHANCEMENT] Notifications: Add a histogram `prometheus_notifications_latency_histogram_seconds` to complement the existing summary. #16637
+- [ENHANCEMENT] Remote-write: Add custom scope support for AzureAD authentication. #17483
+- [ENHANCEMENT] SD: add a `config` label with job name for most `prometheus_sd_refresh` metrics. #17138
+- [ENHANCEMENT] TSDB: New histogram `prometheus_tsdb_sample_ooo_delta`, the distribution of out-of-order samples in seconds. Collected for all samples, accepted or not. #17477
+- [ENHANCEMENT] Remote-read: Validate histograms received via remote-read. #17561
+- [PERF] TSDB: Small optimizations to postings index. #17439
+- [PERF] Scraping: Speed up relabelling of series. #17530
+- [PERF] PromQL: Small optimisations in binary operators. #17524, #17519.
+- [BUGFIX] UI: PromQL autocomplete now shows the correct type and HELP text for OpenMetrics counters whose samples end in `_total`. #17682
+- [BUGFIX] UI: Fixed codemirror-promql incorrectly showing label completion suggestions after the closing curly brace of a vector selector. #17602
+- [BUGFIX] UI: Query editor no longer suggests a duration unit if one is already present after a number. #17605
+- [BUGFIX] PromQL: Fix some "vector cannot contain metrics with the same labelset" errors when experimental delayed name removal is enabled. #17678
+- [BUGFIX] PromQL: Fix possible corruption of PromQL text if the query had an empty `ignoring()` and non-empty grouping. #17643
+- [BUGFIX] PromQL: Fix resets/changes to return empty results for anchored selectors when all samples are outside the range. #17479
+- [BUGFIX] PromQL: Check more consistently for many-to-one matching in filter binary operators. #17668
+- [BUGFIX] PromQL: Fix collision in unary negation with non-overlapping series. #17708
+- [BUGFIX] PromQL: Fix collision in label_join and label_replace with non-overlapping series. #17703
+- [BUGFIX] PromQL: Fix bug with inconsistent results for queries with OR expression when experimental delayed name removal is enabled. #17161
+- [BUGFIX] PromQL: Ensure that `rate`/`increase`/`delta` of histograms results in a gauge histogram. #17608
+- [BUGFIX] PromQL: Do not panic while iterating over invalid histograms. #17559
+- [BUGFIX] TSDB: Reject chunk files whose encoded chunk length overflows int. #17533
+- [BUGFIX] TSDB: Do not panic during resolution reduction of invalid histograms. #17561
+- [BUGFIX] Remote-write Receive: Avoid duplicate labels when experimental type-and-unit-label feature is enabled. #17546
+- [BUGFIX] OTLP Receiver: Only write metadata to disk when experimental metadata-wal-records feature is enabled. #17472
+
+## 3.8.1 / 2025-12-16
+
+* [SECURITY] Remote-Write: Reject snappy-compressed requests whose declared decoded length exceeds the decode limit. #17683
+* [BUGFIX] remote: Fix Remote Write receiver, so it does not send wrong response headers for v1 flow and cause Prometheus senders to emit false partial error log and metrics. #17683
+
+## 3.8.0 / 2025-11-28
+
+* [CHANGE] Remote-write: Update receiving to [2.0-rc.4 spec](https://github.com/prometheus/docs/blob/60c24e450010df38cfcb4f65df874f6f9b26dbcb/docs/specs/prw/remote_write_spec_2_0.md). "created timestamp" (CT) is now called "start timestamp" (ST). #17411
+* [CHANGE] TSDB: Native Histogram Custom Bounds with a NaN threshold are now rejected. #17287
+* [FEATURE] OAuth2: support jwt-bearer grant-type (RFC7523 3.1). #17592
+* [FEATURE] Dockerfile: Add OpenContainers spec labels to Dockerfile. #16483
+* [FEATURE] SD: Add unified AWS service discovery for ec2, lightsail and ecs services. #17406
+* [FEATURE] Native histograms are now a stable, but optional feature, use the `scrape_native_histograms` config setting. #17232 #17315
+* [FEATURE] UI: Support anchored and smoothed keyword in promql editor. #17239
+* [FEATURE] UI: Show detailed relabeling steps for each discovered target. #17337
+* [FEATURE] Alerting: Add urlQueryEscape to template functions. #17403
+* [FEATURE] Promtool: Add  Remote-Write 2.0 support to `promtool push metrics` via the `--protobuf_message` flag. #17417
+* [ENHANCEMENT] Clarify the docs about handling negative native histograms.  #17249
+* [ENHANCEMENT] Mixin: Add static UID to the remote-write dashboard. #17256
+* [ENHANCEMENT] PromQL: Reconcile mismatched NHCB bounds in `Add` and `Sub`. #17278
+* [ENHANCEMENT] Alerting: Add "unknown" state for alerting rules that haven't been evaluated yet. #17282
+* [ENHANCEMENT] Scrape: Allow simultaneous use of classic histogram → NHCB conversion and zero-timestamp ingestion. #17305
+* [ENHANCEMENT] UI: Add smoothed/anchored in explain. #17334
+* [ENHANCEMENT] OTLP: De-duplicate any `target_info` samples with the same timestamp for the same series. #17400
+* [ENHANCEMENT] Document `use_fips_sts_endpoint` in `sigv4` config sections. #17304
+* [ENHANCEMENT] Document Prometheus Agent. #14519
+* [PERF] PromQL: Speed up parsing of variadic functions. #17316
+* [PERF] UI: Speed up alerts/rules/... pages by not rendering collapsed content. #17485
+* [PERF] UI: Performance improvement when getting label name and values in promql editor. #17194
+* [PERF] UI: Speed up /alerts for many firing alerts via virtual scrolling.  #17254
+* [BUGFIX] PromQL: Fix slice indexing bug in info function on churning series. #17199
+* [BUGFIX] API: Reduce lock contention on `/api/v1/targets`. #17306
+* [BUGFIX] PromQL: Consistent handling of gauge vs. counter histograms in aggregations. #17312
+* [BUGFIX] TSDB: Allow NHCB with -Inf as the first custom value. #17320
+* [BUGFIX] UI: Fix duplicate loading of data from the API speed up rendering of some pages. #17357
+* [BUGFIX] Old UI: Fix createExpressionLink to correctly build /graph URLs so links from Alerts/Rules work again. #17365
+* [BUGFIX] PromQL: Avoid panic when parsing malformed `info` call. #17379
+* [BUGFIX] PromQL: Include histograms when enforcing sample_limit. #17390
+* [BUGFIX] Config: Fix panic if TLS CA file is absent. #17418
+* [BUGFIX] PromQL: Fix `histogram_fraction` for classic histograms and NHCB if lower bound is in the first bucket. #17424
+
+## 3.7.3 / 2025-10-29
+
+* [BUGFIX] UI: Revert changed (and breaking) redirect behavior for `-web.external-url` if `-web.route-prefix` is configured, which was introduced in #17240. #17389
+* [BUGFIX] Fix federation of some native histograms. #17299 #17409
+* [BUGFIX] promtool: `check config` would fail when `--lint=none` flag was set. #17399 #17414
+* [BUGFIX] Remote-write: fix a deadlock in the queue resharding logic that can lead to suboptimal queue behavior. #17412
+
+## 3.7.2 / 2025-10-22
+
+* [BUGFIX] AWS SD: Fix AWS SDK v2 credentials handling for EC2 and Lightsail discovery. #17355
+* [BUGFIX] AWS SD: Load AWS region from IMDS when not set. #17376
+* [BUGFIX] Relabeling: Fix `labelmap` action validation with the legacy metric name validation scheme. #17372
+* [BUGFIX] PromQL: Fix parsing failure when `anchored` and `smoothed` are used as metric names and label names. #17353
+* [BUGFIX] PromQL: Fix formatting of range vector selectors with `smoothed`/`anchored` modifier. #17354
+
+## 3.7.1 / 2025-10-16
+
+* [BUGFIX] OTLP: Prefix `key_` to label name when translating an OTel attribute name starting with a single underscore, and keep multiple consecutive underscores in label name when translating an OTel attribute name. This reverts the breaking changes introduced in 3.7.0. #17344
+
+## 3.7.0 / 2025-10-15
+
+* [CHANGE] Remote-write: the following metrics are deprecated:
+   - `prometheus_remote_storage_samples_in_total`, use `prometheus_wal_watcher_records_read_total{type="samples"}` and `prometheus_remote_storage_samples_dropped_total` instead,
+   - `prometheus_remote_storage_histograms_in_total`, use `prometheus_wal_watcher_records_read_total{type=~".*histogram_samples"}` and `prometheus_remote_storage_histograms_dropped_total` instead,
+   - `prometheus_remote_storage_exemplars_in_total`, use `prometheus_wal_watcher_records_read_total{type="exemplars"}` and `prometheus_remote_storage_exemplars_dropped_total` instead,
+   - `prometheus_remote_storage_highest_timestamp_in_seconds`, use the more accurate `prometheus_remote_storage_queue_highest_timestamp_seconds` instead in dashboards and alerts to properly account for relabeling and for more accuracy. #17065
+* [FEATURE] PromQL: Add support for experimental anchored and smoothed rate behind feature flag `promql-extended-range-selectors`. #16457
+* [FEATURE] Federation: Add support for native histograms with custom buckets (NHCB). #17215
+* [FEATURE] PromQL: Add `first_over_time(...)` and `ts_of_first_over_time(...)` behind feature flag `experimental-promql-functions`. #16963 #17021
+* [FEATURE] Remote-write: Add support for Azure Workload Identity as an authentication method for the receiver. #16788
+* [FEATURE] Remote-write: Add type and unit labels to outgoing time series in remote-write 2.0 when the `type-and-unit-labels` feature flag is enabled. #17033
+* [FEATURE] OTLP: Write start time of metrics as created time zero samples into TSDB when `created-timestamp-zero-ingestion` feature flag is enabled. #16951
+* [ENHANCEMENT] PromQL: Add warn-level annotations for counter reset conflicts in certain histogram operations. #17051 #17094
+* [ENHANCEMENT] UI: Add scrape interval and scrape timeout to targets page. #17158
+* [ENHANCEMENT] TSDB: Reduce the resolution of native histograms read from chunks or remote read if the schema is exponential. #17213
+* [ENHANCEMENT] Remote write: Add logging for unexpected metadata in sample batches, when metadata entries are found in samples-only batches. #17034 #17082
+* [ENHANCEMENT] Rules: Support concurrent evaluation for rules querying `ALERTS` and `ALERTS_FOR_STATE`. #17064
+* [ENHANCEMENT] TSDB: Add logs to improve visibility into internal operations. #17074
+* [PERF] OTLP: Write directly to TSDB instead of passing through a Remote-Write adapter when receiving OTLP metrics. #16951
+* [PERF] OTLP: Reduce number of logs emitted from OTLP endpoint. No need to log duplicate sample errors. #17201
+* [PERF] PromQL: Move more work to preprocessing step. #16896
+* [PERF] PromQL: Reduce allocations when walking the syntax tree. #16593
+* [PERF] TSDB: Optimize appender creation, slightly speeding up startup. #16922
+* [PERF] TSDB: Improve speed of querying a series with multiple matchers. #13971
+* [BUGFIX] Alerting: Mutating alerts relabeling (using `replace` actions, etc.) within a `alertmanager_config.alert_relabel_configs` block is now scoped correctly and no longer yields altered alerts to subsequent blocks. #17063
+* [BUGFIX] Config: Infer valid escaping scheme when scrape config validation scheme is set. #16923
+* [BUGFIX] TSDB: Correctly handle appending mixed-typed samples to the same series. #17071 #17241 #17290 #17295 #17296
+* [BUGFIX] Remote-write: Prevent sending unsupported native histograms with custom buckets (NHCB) over Remote-write 1.0, log warning. #17146
+* [BUGFIX] TSDB: Fix metadata entries handling on `metadata-wal-records` experimental feature for native histograms with custom buckets (NHCB) in protobuf scraping. #17156
+* [BUGFIX] TSDB: Ignore Native Histograms with invalid schemas during WAL/WBL replay. #17214
+* [BUGFIX] PromQL: Avoid empty metric names in annotations for `histogram_quantile()`. #16794
+* [BUGFIX] PromQL: Correct inaccurate character positions in errors for some aggregate expressions. #16996 #17031
+* [BUGFIX] PromQL: Fix `info()` function on churning series. #17135
+* [BUGFIX] PromQL: Set native histogram to gauge type when subtracting or multiplying/dividing with negative factors. #17004
+* [BUGFIX] TSDB: Reject unsupported native histogram schemas when attempting to append to TSDB. For scrape and remote-write implement reducing the resolution to fit the maximum if the schema is within the -9 to 52. #17189
+* [BUGFIX] Remote-write: Fix HTTP handler to return after writing error response for invalid compression. #17050
+* [BUGFIX] Remote-write: Return HTTP error `400` instead of `5xx` for wrongly formatted Native Histograms. #17210
+* [BUGFIX] Scrape: Prevent staleness markers from generating unnecessary series. #16429
+* [BUGFIX] TSDB: Avoid misleading `Failed to calculate size of \"wal\" dir` error logs during WAL clean-up. #17006
+* [BUGFIX] TSDB: Prevent erroneously dropping series records during WAL checkpoints. #17029
+* [BUGFIX] UI: Fix redirect to path of `-web.external-url` if `-web.route-prefix` is configured. #17240
+* [BUGFIX] Remote-write: Do not panic on invalid symbol table in remote-write 2.0. #17160
+
+## 3.6.0 / 2025-09-17
+
+* [FEATURE] PromQL: Add `step()`, and `min()` and `max()` on durations, behind feature flag `promql-duration-expr`. #16777
+* [FEATURE] API: Add a `/v1/status/tsdb/blocks` endpoint exposing metadata about loaded blocks. #16695
+* [FEATURE] Templates: Add `toDuration()` and `now()` functions. #16619
+* [ENHANCEMENT] Discovery: Add support for attaching namespace metadata to targets. #16831
+* [ENHANCEMENT] OTLP: Support new `UnderscoreEscapingWithoutSuffixes` strategy via `otlp.translation_strategy`. #16849
+* [ENHANCEMENT] OTLP: Support including scope metadata as metric labels via `otlp.promote_scope_metadata`. #16878
+* [ENHANCEMENT] OTLP: Add `__type__` and `__unit__` labels when feature flag `type-and-unit-labels` is enabled. #16630
+* [ENHANCEMENT] Tracing: Send the traceparent HTTP header during scrapes. #16425
+* [ENHANCEMENT] UI: Add option to disable info and warning query messages under `Query page settings`. #16901
+* [ENHANCEMENT] UI: Improve metadata handling for `_count/_sum/_bucket` suffixes. #16910
+* [ENHANCEMENT] TSDB: Track stale series in the Head block via the `prometheus_tsdb_head_stale_series` metric. #16925
+* [PERF] PromQL: Improve performance due to internal optimizations. #16797
+* [BUGFIX] Config: Fix "unknown global name escaping method" error messages produced during config validation. #16801
+* [BUGFIX] Discovery: Fix race condition during shutdown. #16820
+* [BUGFIX] OTLP: Generate `target_info` samples between the earliest and latest samples per resource. #16737
+* [BUGFIX] PromQL: Fail when `NaN` is passed as parameter to `topk()`, `bottomk()`, `limitk()` and `limit_ratio()`. #16725
+* [BUGFIX] PromQL: Fix extrapolation for native counter histograms. #16828
+* [BUGFIX] PromQL: Reduce numerical errors by disabling some optimizations. #16895
+* [BUGFIX] PromQL: Fix inconsistencies when using native histograms in subqueries. #16879
+* [BUGFIX] PromQL: Fix inconsistent annotations for `rate()` and `increase()` on histograms when feature flag `type-and-unit-labels` is enabled. #16915
+* [BUGFIX] Scraping: Fix memory corruption in `slicelabels` builds. #16946
+* [BUGFIX] TSDB: Fix panic on append when feature flag `created-timestamp-zero-ingestion` is enabled. #16332
+* [BUGFIX] TSDB: Fix panic on append for native histograms with empty buckets. #16893
+
+## 3.5.0 / 2025-07-14
+
+* [FEATURE] PromQL: Add experimental type and unit metadata labels, behind feature flag `type-and-unit-labels`. #16228 #16632 #16718 #16743
+* [FEATURE] PromQL: Add `ts_of_(min|max|last)_over_time`, behind feature flag `experimental-promql-functions`. #16722 #16733
+* [FEATURE] Scraping: Add global option `always_scrape_classic_histograms` to scrape a classic histogram even if it is also exposed as native. #16452
+* [FEATURE] OTLP: New config options `promote_all_resource_attributes` and `ignore_resource_attributes`. #16426
+* [FEATURE] Discovery: New service discovery for STACKIT Cloud. #16401
+* [ENHANCEMENT] Hetzner SD: Add `label_selector` to filter servers. #16512
+* [ENHANCEMENT] PromQL: support non-constant parameter in aggregations like `quantile` and `topk`. #16404
+* [ENHANCEMENT] UI: Better total target count display when using `keep_dropped_targets` option. #16604
+* [ENHANCEMENT] UI: Add simple filtering on the `/rules` page. #16605
+* [ENHANCEMENT] UI: Display query stats in hover tooltip over table query tab. #16723
+* [ENHANCEMENT] UI: Clear search field on `/targets` page. #16567
+* [ENHANCEMENT] Rules: Check that rules parse without error earlier at startup. #16601
+* [ENHANCEMENT] Promtool: Optional fuzzy float64 comparison in rules unittests. #16395
+* [PERF] PromQL: Reuse `histogramStatsIterator` where possible. #16686
+* [PERF] PromQL: Reuse storage for custom bucket values for native histograms. #16565
+* [PERF] UI: Optimize memoization and search debouncing on `/targets` page. #16589
+* [PERF] UI: Fix full-page re-rendering when opening status nav menu. #16590
+* [PERF] Kubernetes SD: use service cache.Indexer to achieve better performance. #16365
+* [PERF] TSDB: Optionally use Direct IO for chunks writing. #15365
+* [PERF] TSDB: When fetching label values, stop work earlier if the limit is reached. #16158
+* [PERF] Labels: Simpler/faster stringlabels encoding. #16069
+* [PERF] Scraping: Reload scrape pools concurrently. #16595 #16783
+* [BUGFIX] Top-level: Update GOGC before loading TSDB. #16491
+* [BUGFIX] Config: Respect GOGC environment variable if no "runtime" block exists. #16558
+* [BUGFIX] PromQL: Fix native histogram `last_over_time`. #16744
+* [BUGFIX] PromQL: Fix reported parser position range in errors for aggregations wrapped in ParenExpr #16041 #16754
+* [BUGFIX] PromQL: Don't emit a value from `histogram_fraction` or `histogram_quantile` if classic and native histograms are present at the same timestamp. #16552
+* [BUGFIX] PromQL: Incorrect rounding of `[1001ms]` to `[1s]` and similar. #16478
+* [BUGFIX] PromQL: Fix inconsistent / sometimes negative `histogram_count` and `histogram_sum`. #16682
+* [BUGFIX] PromQL: Improve handling of NaNs in native histograms. #16724
+* [BUGFIX] PromQL: Fix unary operator precedence in duration expressions. #16713
+* [BUGFIX] PromQL: Improve consistency of `avg` aggregation and `avg_over_time`. #16569 #16773
+* [BUGFIX] UI: Add query warnings and info to graph view. #16753 #16759
+* [BUGFIX] API: Add HTTP `Vary: Origin` header to responses to avoid cache poisoning. #16008
+* [BUGFIX] Discovery: Avoid deadlocks by taking locks in consistent order. #16587
+* [BUGFIX] Remote-write: For Azure AD auth, allow empty `client_id` to suppport system assigned managed identity. #16421
+* [BUGFIX] Scraping: Fix rare memory corruption bug. #16623
+* [BUGFIX] Scraping: continue handling custom-bucket histograms after an exponential histogram is encountered. #16720
+* [BUGFIX] OTLP: Default config not respected when `otlp:` block is unset. #16693
+
+## 3.4.2 / 2025-06-26
+
+* [BUGFIX] OTLP receiver: Fix default configuration not being respected if the `otlp:` block is unset in the config file. #16693
+
+## 3.4.1 / 2025-05-31
+
+* [BUGFIX] Parser: Add reproducer for a dangling-reference issue in parsers. #16633
+
+## 3.4.0 / 2025-05-17
+
+* [CHANGE] Config: Make setting out-of-order native histograms feature (`--enable-feature=ooo-native-histograms`) a no-op. Out-of-order native histograms are now always enabled when `out_of_order_time_window` is greater than zero and `--enable-feature=native-histograms` is set. #16207
+* [FEATURE] OTLP translate: Add feature flag for optionally translating OTel explicit bucket histograms into native histograms with custom buckets. #15850
+* [FEATURE] OTLP translate: Add option to receive OTLP metrics without translating names or attributes. #16441
+* [FEATURE] PromQL: allow arithmetic operations in durations in PromQL parser. #16249
+* [FEATURE] OTLP receiver: Add primitive support for ingesting OTLP delta metrics as-is. #16360
+* [ENHANCEMENT] PromQL: histogram_fraction for bucket histograms. #16095
+* [ENHANCEMENT] TSDB: add `prometheus_tsdb_wal_replay_unknown_refs_total` and `prometheus_tsdb_wbl_replay_unknown_refs_total` metrics to track unknown series references during WAL/WBL replay. #16166
+* [ENHANCEMENT] Scraping: Add config option for escaping scheme request. #16066
+* [ENHANCEMENT] Config: Add global config option for convert_classic_histograms_to_nhcb. #16226
+* [ENHANCEMENT] Alerting: make batch size configurable (`--alertmanager.notification-batch-size`). #16254
+* [PERF] Kubernetes SD: make endpointSlice discovery more efficient. #16433
+* [BUGFIX] Config: Fix auto-reload on changes to rule and scrape config files. #16340
+* [BUGFIX] Scraping: Skip native histogram series if ingestion is disabled. #16218
+* [BUGFIX] TSDB: Handle metadata/tombstones/exemplars for duplicate series during WAL replay. #16231
+* [BUGFIX] TSDB: Avoid processing exemplars outside the valid time range during WAL replay. #16242
+* [BUGFIX] Promtool: Add feature flags for PromQL features. #16443
+* [BUGFIX] Rules: correct logging of alert name & template data. #15093
+* [BUGFIX] PromQL: Use arithmetic mean for `histogram_stddev()` and `histogram_stdvar()` . #16444
+
+## 3.3.0 / 2025-04-15
+
+* [FEATURE] PromQL: Implement `idelta()` and `irate()` for native histograms. #15853
+* [ENHANCEMENT] Scaleway SD: Add `__meta_scaleway_instance_public_ipv4_addresses` and `__meta_scaleway_instance_public_ipv6_addresses` labels. #14228
+* [ENHANCEMENT] TSDB: Reduce locking while reloading blocks. #12920
+* [ENHANCEMENT] PromQL: Allow UTF-8 labels in `label_replace()`. #15974
+* [ENHANCEMENT] Promtool: `tsdb create-blocks-from openmetrics` can now read from a Pipe. #16011
+* [ENHANCEMENT] Rules: Add support for anchors and aliases in rule files. #14957
+* [ENHANCEMENT] Dockerfile: Make `/prometheus` writable. #16073
+* [ENHANCEMENT] API: Include scrape pool name for dropped targets in `/api/v1/targets`. #16085
+* [ENHANCEMENT] UI: Improve time formatting and copying of selectors. #15999 #16165
+* [ENHANCEMENT] UI: Bring back vertical grid lines and graph legend series toggling instructions. #16163 #16164
+* [ENHANCEMENT] Mixin: The `cluster` label can be customized using `clusterLabel`. #15826
+* [PERF] TSDB: Optimize some operations on head chunks by taking shortcuts. #12659
+* [PERF] TSDB & Agent: Reduce memory footprint during WL replay. #15778
+* [PERF] Remote-Write: Reduce memory footprint during WAL replay. #16197
+* [PERF] API: Reduce memory footprint during header parsing. #16001
+* [PERF] Rules: Improve dependency evaluation, enabling better concurrency. #16039
+* [PERF] Scraping: Improve scraping performance for native histograms. #15731
+* [PERF] Scraping: Improve parsing of created timestamps. #16072
+* [BUGFIX] Scraping: Bump cache iteration after error to avoid false duplicate detections. #16174
+* [BUGFIX] Scraping: Skip native histograms series when ingestion is disabled. #16218
+* [BUGFIX] PromQL: Fix counter reset detection for native histograms. #15902 #15987
+* [BUGFIX] PromQL: Fix inconsistent behavior with an empty range. #15970
+* [BUGFIX] PromQL: Fix inconsistent annotation in `quantile_over_time()`. #16018
+* [BUGFIX] PromQL: Prevent `label_join()` from producing duplicates. #15975
+* [BUGFIX] PromQL: Ignore native histograms in `scalar()`, `sort()` and `sort_desc()`. #15964
+* [BUGFIX] PromQL: Fix annotations for binary operations between incompatible native histograms. #15895
+* [BUGFIX] Alerting: Consider alert relabeling when deciding whether alerts are dropped. #15979
+* [BUGFIX] Config: Set `GoGC` to the default value in case of an empty configuration. #16052
+* [BUGFIX] TSDB: Fix unknown series errors and potential data loss during WAL replay when inactive series are removed from the head and reappear before the next WAL checkpoint. #16060
+* [BUGFIX] Scaleway SD: The public IP will no longer be set to `__meta_meta_scaleway_instance_public_ipv4` if it is an IPv6 address. #14228
+* [BUGFIX] UI: Display the correct value of Alerting rules' `keep_firing_for`. #16211
+
+## 3.2.1 / 2025-02-25
+
+* [BUGFIX] Don't send `Accept` header `escape=allow-utf-8` when `metric_name_validation_scheme: legacy` is configured. #16061
+
+## 3.2.0 / 2025-02-17
+
+* [CHANGE] relabel: Replace actions can now use UTF-8 characters in `targetLabel` field. Note that `$<chars>` or `${<chars>}` will be expanded. This also apply to `replacement` field for `LabelMap` action. #15851
+* [CHANGE] rulefmt: Rule names can use UTF-8 characters, except `{` and `}` characters (due to common mistake checks). #15851
+* [FEATURE] remote/otlp: Add feature flag `otlp-deltatocumulative` to support conversion from delta to cumulative. #15165
+* [ENHANCEMENT] openstack SD: Discover Octavia loadbalancers. #15539
+* [ENHANCEMENT] scrape: Add metadata for automatic metrics to WAL for `metadata-wal-records` feature. #15837
+* [ENHANCEMENT] promtool: Support linting of scrape interval, through lint option `too-long-scrape-interval`. #15719
+* [ENHANCEMENT] promtool: Add --ignore-unknown-fields option. #15706
+* [ENHANCEMENT] ui: Make "hide empty rules" and "hide empty rules" persistent #15807
+* [ENHANCEMENT] web/api: Add a limit parameter to `/query` and `/query_range`. #15552
+* [ENHANCEMENT] api: Add fields Node and ServerTime to `/status`. #15784
+* [PERF] Scraping: defer computing labels for dropped targets until they are needed by the UI. #15261
+* [BUGFIX] remotewrite2: Fix invalid metadata bug for metrics without metadata. #15829
+* [BUGFIX] remotewrite2: Fix the unit field propagation. #15825
+* [BUGFIX] scrape: Fix WAL metadata for histograms and summaries. #15832
+* [BUGFIX] ui: Merge duplicate "Alerts page settings" sections. #15810
+* [BUGFIX] PromQL: Fix `<aggr_over_time>` functions with histograms. #15711
+
+## 3.1.0 / 2025-01-02
+
+ * [SECURITY] upgrade golang.org/x/crypto to address reported CVE-2024-45337. #15691
+ * [CHANGE] Notifier: Increment prometheus_notifications_errors_total by the number of affected alerts rather than per batch. #15428
+ * [CHANGE] API: list rules field "groupNextToken:omitempty" renamed to "groupNextToken". #15400
+ * [ENHANCEMENT] OTLP translate: keep identifying attributes in target_info. #15448
+ * [ENHANCEMENT] Paginate rule groups, add infinite scroll to rules within groups. #15677
+ * [ENHANCEMENT] TSDB: Improve calculation of space used by labels. #13880
+ * [ENHANCEMENT] Rules: new metric rule_group_last_rule_duration_sum_seconds. #15672
+ * [ENHANCEMENT] Observability: Export 'go_sync_mutex_wait_total_seconds_total' metric. #15339
+ * [ENHANCEMENT] Remote-Write: optionally use a DNS resolver that picks a random IP. #15329
+ * [PERF] Optimize `l=~".+"` matcher. #15474, #15684
+ * [PERF] TSDB: Cache all symbols for compaction. #15455
+ * [PERF] TSDB: MemPostings: keep a map of label values slices. #15426
+ * [PERF] Remote-Write: Remove interning hook. #15456
+ * [PERF] Scrape: optimize string manipulation for experimental native histograms with custom buckets. #15453
+ * [PERF] TSDB: reduce memory allocations. #15465, #15427
+ * [PERF] Storage: Implement limit in mergeGenericQuerier. #14489
+ * [PERF] TSDB: Optimize inverse matching. #14144
+ * [PERF] Regex: use stack memory for lowercase copy of string. #15210
+ * [PERF] TSDB: When deleting from postings index, pause to unlock and let readers read. #15242
+ * [BUGFIX] Main: Avoid possible segfault at exit. (#15724)
+ * [BUGFIX] Rules: Do not run rules concurrently if uncertain about dependencies. #15560
+ * [BUGFIX] PromQL: Adds test for `absent`, `absent_over_time` and `deriv` func with histograms. #15667
+ * [BUGFIX] PromQL: Fix various bugs related to quoting UTF-8 characters. #15531
+ * [BUGFIX] Scrape: fix nil panic after scrape loop reload. #15563
+ * [BUGFIX] Remote-write: fix panic on repeated log message. #15562
+ * [BUGFIX] Scrape: reload would ignore always_scrape_classic_histograms and convert_classic_histograms_to_nhcb configs. #15489
+ * [BUGFIX] TSDB: fix data corruption in experimental native histograms. #15482
+ * [BUGFIX] PromQL: Ignore histograms in all time related functions. #15479
+ * [BUGFIX] OTLP receiver: Convert metric metadata. #15416
+ * [BUGFIX] PromQL: Fix `resets` function for histograms. #15527
+ * [BUGFIX] PromQL: Fix behaviour of `changes()` for mix of histograms and floats. #15469
+ * [BUGFIX] PromQL: Fix behaviour of some aggregations with histograms. #15432
+ * [BUGFIX] allow quoted exemplar keys in openmetrics text format. #15260
+ * [BUGFIX] TSDB: fixes for rare conditions when loading write-behind-log (WBL). #15380
+ * [BUGFIX] `round()` function did not remove `__name__` label. #15250
+ * [BUGFIX] Promtool: analyze block shows metric name with 0 cardinality. #15438
+ * [BUGFIX] PromQL: Fix `count_values` for histograms. #15422
+ * [BUGFIX] PromQL: fix issues with comparison binary operations with `bool` modifier and native histograms. #15413
+ * [BUGFIX] PromQL: fix incorrect "native histogram ignored in aggregation" annotations. #15414
+ * [BUGFIX] PromQL: Corrects the behaviour of some operator and aggregators with Native Histograms. #15245
+ * [BUGFIX] TSDB: Always return unknown hint for first sample in non-gauge histogram chunk. #15343
+ * [BUGFIX] PromQL: Clamp functions: Ignore any points with native histograms. #15169
+ * [BUGFIX] TSDB: Fix race on stale values in headAppender. #15322
+ * [BUGFIX] UI: Fix selector / series formatting for empty metric names. #15340
+ * [BUGFIX] OTLP receiver: Allow colons in non-standard units. #15710
+
+## 3.0.1 / 2024-11-28
+
+The first bug fix release for Prometheus 3.
+
+* [BUGFIX] Promql: Make subqueries left open. #15431
+* [BUGFIX] Fix memory leak when query log is enabled. #15434
+* [BUGFIX] Support utf8 names on /v1/label/:name/values endpoint. #15399
+
+## 3.0.0 / 2024-11-14
+
+This release includes new features such as a brand new UI and UTF-8 support enabled by default. As this marks the first new major version in seven years, several breaking changes are introduced. The breaking changes are mainly around the removal of deprecated feature flags and CLI arguments, and the full list can be found below. For users that want to upgrade we recommend to read through our [migration guide](https://prometheus.io/docs/prometheus/3.0/migration/).
+
+* [CHANGE] Set the `GOMAXPROCS` variable automatically to match the Linux CPU quota. Use `--no-auto-gomaxprocs` to disable it. The `auto-gomaxprocs` feature flag was removed. #15376
+* [CHANGE] Set the `GOMEMLIMIT` variable automatically to match the Linux container memory limit. Use `--no-auto-gomemlimit` to disable it. The `auto-gomemlimit` feature flag was removed. #15373
+* [CHANGE] Scraping: Remove implicit fallback to the Prometheus text format in case of invalid/missing Content-Type and fail the scrape instead. Add ability to specify a `fallback_scrape_protocol` in the scrape config. #15136
+* [CHANGE] Remote-write: default enable_http2 to false. #15219
+* [CHANGE] Scraping: normalize "le" and "quantile" label values upon ingestion. #15164
+* [CHANGE] Scraping: config `scrape_classic_histograms` was renamed to `always_scrape_classic_histograms`. #15178
+* [CHANGE] Config: remove expand-external-labels flag, expand external labels env vars by default. #14657
+* [CHANGE] Disallow configuring AM with the v1 api. #13883
+* [CHANGE] regexp `.` now matches all characters (performance improvement). #14505
+* [CHANGE] `holt_winters` is now called `double_exponential_smoothing` and moves behind the [experimental-promql-functions feature flag](https://prometheus.io/docs/prometheus/latest/feature_flags/#experimental-promql-functions). #14930
+* [CHANGE] API: The OTLP receiver endpoint can now be enabled using `--web.enable-otlp-receiver` instead of `--enable-feature=otlp-write-receiver`. #14894
+* [CHANGE] Prometheus will not add or remove port numbers from the target address. `no-default-scrape-port` feature flag removed. #14160
+* [CHANGE] Logging: the format of log lines has changed a little, along with the adoption of Go's Structured Logging package. #14906
+* [CHANGE] Don't create extra `_created` timeseries if feature-flag `created-timestamp-zero-ingestion` is enabled. #14738
+* [CHANGE] Float literals and time durations being the same is now a stable fetaure. #15111
+* [CHANGE] UI: The old web UI has been replaced by a completely new one that is less cluttered and adds a few new features (PromLens-style tree view, better metrics explorer, "Explain" tab). However, it is still missing some features of the old UI (notably, exemplar display and heatmaps). To switch back to the old UI, you can use the feature flag `--enable-feature=old-ui` for the time being. #14872
+* [CHANGE] PromQL: Range selectors and the lookback delta are now left-open, i.e. a sample coinciding with the lower time limit is excluded rather than included. #13904
+* [CHANGE] Kubernetes SD: Remove support for `discovery.k8s.io/v1beta1` API version of EndpointSlice. This version is no longer served as of Kubernetes v1.25. #14365
+* [CHANGE] Kubernetes SD: Remove support for `networking.k8s.io/v1beta1` API version of Ingress. This version is no longer served as of Kubernetes v1.22. #14365
+* [CHANGE] UTF-8: Enable UTF-8 support by default. Prometheus now allows all UTF-8 characters in metric and label names. The corresponding `utf8-name` feature flag has been removed. #14705, #15258
+* [CHANGE] Console: Remove example files for the console feature. Users can continue using the console feature by supplying their own JavaScript and templates. #14807
+* [CHANGE] SD: Enable the new service discovery manager by default. This SD manager does not restart unchanged discoveries upon reloading. This makes reloads faster and reduces pressure on service discoveries' sources. The corresponding `new-service-discovery-manager` feature flag has been removed. #14770
+* [CHANGE] Agent mode has been promoted to stable. The feature flag `agent` has been removed. To run Prometheus in Agent mode, use the new `--agent` cmdline arg instead. #14747
+* [CHANGE] Remove deprecated `remote-write-receiver`,`promql-at-modifier`, and `promql-negative-offset` feature flags. #13456, #14526
+* [CHANGE] Remove deprecated `storage.tsdb.allow-overlapping-blocks`, `alertmanager.timeout`, and `storage.tsdb.retention` flags. #14640, #14643
+* [FEATURE] OTLP receiver: Ability to skip UTF-8 normalization using `otlp.translation_strategy = NoUTF8EscapingWithSuffixes` configuration option. #15384
+* [FEATURE] Support config reload automatically - feature flag `auto-reload-config`. #14769, #15011
+* [ENHANCEMENT] Scraping, rules: handle targets reappearing, or rules moving group, when out-of-order is enabled. #14710
+* [ENHANCEMENT] Tools: add debug printouts to promtool rules unit testing #15196
+* [ENHANCEMENT] Scraping: support Created-Timestamp feature on native histograms. #14694
+* [ENHANCEMENT] UI: Many fixes and improvements. #14898, #14899, #14907, #14908, #14912, #14913, #14914, #14931, #14940, #14945, #14946, #14972, #14981, #14982, #14994, #15096
+* [ENHANCEMENT] UI: Web UI now displays notifications, e.g. when starting up and shutting down. #15082
+* [ENHANCEMENT] PromQL: Introduce exponential interpolation for native histograms. #14677
+* [ENHANCEMENT] TSDB: Add support for ingestion of out-of-order native histogram samples. #14850, #14546
+* [ENHANCEMENT] Alerts: remove metrics for removed Alertmanagers. #13909
+* [ENHANCEMENT] Kubernetes SD: Support sidecar containers in endpoint discovery. #14929
+* [ENHANCEMENT] Consul SD: Support catalog filters. #11224
+* [ENHANCEMENT] Move AM discovery page from "Monitoring status" to "Server status". #14875
+* [PERF] TSDB: Parallelize deletion of postings after head compaction. #14975
+* [PERF] TSDB: Chunk encoding: shorten some write sequences. #14932
+* [PERF] TSDB: Grow postings by doubling. #14721
+* [PERF] Relabeling: Optimize adding a constant label pair. #12180
+* [BUGFIX] Scraping: Don't log errors on empty scrapes. #15357
+* [BUGFIX] UI: fix selector / series formatting for empty metric names. #15341
+* [BUGFIX] PromQL: Fix stddev+stdvar aggregations to always ignore native histograms. #14941
+* [BUGFIX] PromQL: Fix stddev+stdvar aggregations to treat Infinity consistently. #14941
+* [BUGFIX] OTLP receiver: Preserve colons when generating metric names in suffix adding mode (this mode is always enabled, unless one uses Prometheus as a library). #15251
+* [BUGFIX] Scraping: Unit was missing when using protobuf format. #15095
+* [BUGFIX] PromQL: Only return "possible non-counter" annotation when `rate` returns points. #14910
+* [BUGFIX] TSDB: Chunks could have one unnecessary zero byte at the end. #14854
+* [BUGFIX] "superfluous response.WriteHeader call" messages in log. #14884
+* [BUGFIX] PromQL: Unary negation of native histograms. #14821
+* [BUGFIX] PromQL: Handle stale marker in native histogram series (e.g. if series goes away and comes back). #15025
+* [BUGFIX] Autoreload: Reload invalid yaml files. #14947
+* [BUGFIX] Scrape: Do not override target parameter labels with config params. #11029
+
+## 2.53.5 / 2025-06-30
+
+* [ENHANCEMENT] TSDB: Add backward compatibility with the upcoming TSDB block index v3 #16762
+* [BUGFIX] Top-level: Update GOGC before loading TSDB #16521
+
+## 2.53.4 / 2025-03-18
+
+* [BUGFIX] Runtime: fix GOGC is being set to 0 when installed with empty prometheus.yml file resulting high cpu usage. #16090
+* [BUGFIX] Scrape: fix dropping valid metrics after previous scrape failed. #16220
+
+## 2.53.3 / 2024-11-04
+
+* [BUGFIX] Scraping: allow multiple samples on same series, with explicit timestamps. #14685, #14740
+
+## 2.53.2 / 2024-08-09
+
+Fix a bug where Prometheus would crash with a segmentation fault if a remote-read
+request accessed a block on disk at about the same time as TSDB created a new block.
+
+* [BUGFIX] Remote-Read: Resolve occasional segmentation fault on query. #14515,#14523
+
+## 2.55.1 / 2024-11-04
+
+* [BUGFIX] `round()` function did not remove `__name__` label. #15250
+
+## 2.55.0 / 2024-10-22
+
+* [FEATURE] PromQL: Add experimental `info` function. #14495
+* [FEATURE] Support UTF-8 characters in label names - feature flag `utf8-names`. #14482, #14880, #14736, #14727
+* [FEATURE] Scraping: Add the ability to set custom `http_headers` in config. #14817
+* [FEATURE] Scraping: Support feature flag `created-timestamp-zero-ingestion` in OpenMetrics. #14356, #14815
+* [FEATURE] Scraping: `scrape_failure_log_file` option to log failures to a file. #14734
+* [FEATURE] OTLP receiver: Optional promotion of resource attributes to series labels. #14200
+* [FEATURE] Remote-Write: Support Google Cloud Monitoring authorization. #14346
+* [FEATURE] Promtool: `tsdb create-blocks` new option to add labels. #14403
+* [FEATURE] Promtool: `promtool test` adds `--junit` flag to format results. #14506
+* [FEATURE] TSDB: Add `delayed-compaction` feature flag, for people running many Prometheus to randomize timing. #12532
+* [ENHANCEMENT] OTLP receiver: Warn on exponential histograms with zero count and non-zero sum. #14706
+* [ENHANCEMENT] OTLP receiver: Interrupt translation on context cancellation/timeout. #14612
+* [ENHANCEMENT] Remote Read client: Enable streaming remote read if the server supports it. #11379
+* [ENHANCEMENT] Remote-Write: Don't reshard if we haven't successfully sent a sample since last update. #14450
+* [ENHANCEMENT] PromQL: Delay deletion of `__name__` label to the end of the query evaluation. This is **experimental** and enabled under the feature-flag `promql-delayed-name-removal`. #14477
+* [ENHANCEMENT] PromQL: Experimental `sort_by_label` and `sort_by_label_desc` sort by all labels when label is equal. #14655, #14985
+* [ENHANCEMENT] PromQL: Clarify error message logged when Go runtime panic occurs during query evaluation. #14621
+* [ENHANCEMENT] PromQL: Use Kahan summation for better accuracy in `avg` and `avg_over_time`. #14413
+* [ENHANCEMENT] Tracing: Improve PromQL tracing, including showing the operation performed for aggregates, operators, and calls. #14816
+* [ENHANCEMENT] API: Support multiple listening addresses. #14665
+* [ENHANCEMENT] TSDB: Backward compatibility with upcoming index v3. #14934
+* [PERF] TSDB: Query in-order and out-of-order series together. #14354, #14693, #14714, #14831, #14874, #14948, #15120
+* [PERF] TSDB: Streamline reading of overlapping out-of-order head chunks. #14729
+* [BUGFIX] PromQL: make sort_by_label stable. #14985
+* [BUGFIX] SD: Fix dropping targets (with feature flag `new-service-discovery-manager`). #13147
+* [BUGFIX] SD: Stop storing stale targets (with feature flag `new-service-discovery-manager`). #13622
+* [BUGFIX] Scraping: exemplars could be dropped in protobuf scraping. #14810
+* [BUGFIX] Remote-Write: fix metadata sending for experimental Remote-Write V2. #14766
+* [BUGFIX] Remote-Write: Return 4xx not 5xx when timeseries has duplicate label. #14716
+* [BUGFIX] Experimental Native Histograms: many fixes for incorrect results, panics, warnings. #14513, #14575, #14598, #14609, #14611, #14771, #14821
+* [BUGFIX] TSDB: Only count unknown record types in `record_decode_failures_total` metric. #14042
+
+## 2.54.1 / 2024-08-27
+
+* [BUGFIX] Scraping: allow multiple samples on same series, with explicit timestamps (mixing samples of the same series with and without timestamps is still rejected). #14685
+* [BUGFIX] Docker SD: fix crash in `match_first_network` mode when container is reconnected to a new network. #14654
+* [BUGFIX] PromQL: fix experimental native histograms getting corrupted due to vector selector bug in range queries. #14538
+* [BUGFIX] PromQL: fix experimental native histogram counter reset detection on stale samples. #14514
+* [BUGFIX] PromQL: fix native histograms getting corrupted due to vector selector bug in range queries. #14605
+
+## 2.54.0 / 2024-08-09
+
+Release 2.54 brings a release candidate of a major new version of [Remote Write: 2.0](https://prometheus.io/docs/specs/remote_write_spec_2_0/).
+This is experimental at this time and may still change.
+Remote-write v2 is enabled by default, but can be disabled via feature-flag `web.remote-write-receiver.accepted-protobuf-messages`.
+
+* [CHANGE] Remote-Write: `highest_timestamp_in_seconds` and `queue_highest_sent_timestamp_seconds` metrics now initialized to 0. #14437
+* [CHANGE] API: Split warnings from info annotations in API response. #14327
+* [FEATURE] Remote-Write: Version 2.0 experimental, plus metadata in WAL via feature flag `metadata-wal-records` (defaults on). #14395,#14427,#14444
+* [FEATURE] PromQL: add limitk() and limit_ratio() aggregation operators. #12503
+* [ENHANCEMENT] PromQL: Accept underscores in literal numbers, e.g. 1_000_000 for 1 million. #12821
+* [ENHANCEMENT] PromQL: float literal numbers and durations are now interchangeable (experimental). Example: `time() - my_timestamp > 10m`. #9138
+* [ENHANCEMENT] PromQL: use Kahan summation for sum(). #14074,#14362
+* [ENHANCEMENT] PromQL (experimental native histograms): Optimize `histogram_count` and `histogram_sum` functions. #14097
+* [ENHANCEMENT] TSDB: Better support for out-of-order experimental native histogram samples. #14438
+* [ENHANCEMENT] TSDB: Optimise seek within index. #14393
+* [ENHANCEMENT] TSDB: Optimise deletion of stale series. #14307
+* [ENHANCEMENT] TSDB: Reduce locking to optimise adding and removing series. #13286,#14286
+* [ENHANCEMENT] TSDB: Small optimisation: streamline special handling for out-of-order data. #14396,#14584
+* [ENHANCEMENT] Regexps: Optimize patterns with multiple prefixes. #13843,#14368
+* [ENHANCEMENT] Regexps: Optimize patterns containing multiple literal strings. #14173
+* [ENHANCEMENT] AWS SD: expose Primary IPv6 addresses as __meta_ec2_primary_ipv6_addresses. #14156
+* [ENHANCEMENT] Docker SD: add MatchFirstNetwork for containers with multiple networks. #10490
+* [ENHANCEMENT] OpenStack SD: Use `flavor.original_name` if available. #14312
+* [ENHANCEMENT] UI (experimental native histograms): more accurate representation. #13680,#14430
+* [ENHANCEMENT] Agent: `out_of_order_time_window` config option now applies to agent. #14094
+* [ENHANCEMENT] Notifier: Send any outstanding Alertmanager notifications when shutting down. #14290
+* [ENHANCEMENT] Rules: Add label-matcher support to Rules API. #10194
+* [ENHANCEMENT] HTTP API: Add url to message logged on error while sending response. #14209
+* [BUGFIX] TSDB: Exclude OOO chunks mapped after compaction starts (introduced by #14396). #14584
+* [BUGFIX] CLI: escape `|` characters when generating docs. #14420
+* [BUGFIX] PromQL (experimental native histograms): Fix some binary operators between native histogram values. #14454
+* [BUGFIX] TSDB: LabelNames API could fail during compaction. #14279
+* [BUGFIX] TSDB: Fix rare issue where pending OOO read can be left dangling if creating querier fails. #14341
+* [BUGFIX] TSDB: fix check for context cancellation in LabelNamesFor. #14302
+* [BUGFIX] Rules: Fix rare panic on reload. #14366
+* [BUGFIX] Config: In YAML marshalling, do not output a regexp field if it was never set. #14004
+* [BUGFIX] Remote-Write: reject samples with future timestamps. #14304
+* [BUGFIX] Remote-Write: Fix data corruption in remote write if max_sample_age is applied. #14078
+* [BUGFIX] Notifier: Fix Alertmanager discovery not updating under heavy load. #14174
+* [BUGFIX] Regexes: some Unicode characters were not matched by case-insensitive comparison. #14170,#14299
+* [BUGFIX] Remote-Read: Resolve occasional segmentation fault on query. #14515
+
+## 2.53.1 / 2024-07-10
+
+Fix a bug which would drop samples in remote-write if the sending flow stalled
+for longer than it takes to write one "WAL segment". How long this takes depends on the size
+of your Prometheus; as a rough guide with 10 million series it is about 2-3 minutes.
+
+* [BUGFIX] Remote-write: stop dropping samples in catch-up #14446
+
+## 2.53.0 / 2024-06-16
+
+This release changes the default for GOGC, the Go runtime control for the trade-off between excess memory use and CPU usage. We have found that Prometheus operates with minimal additional CPU usage, but greatly reduced memory by adjusting the upstream Go default from 100 to 75.
+
+* [CHANGE] Rules: Execute 1 query instead of N (where N is the number of alerts within alert rule) when restoring alerts. #13980 #14048
+* [CHANGE] Runtime: Change GOGC threshold from 100 to 75 #14176 #14285
+* [FEATURE] Rules: Add new option `query_offset` for each rule group via rule group configuration file and `rule_query_offset` as part of the global configuration to have more resilience for remote write delays. #14061 #14216 #14273
+* [ENHANCEMENT] Rules: Add `rule_group_last_restore_duration_seconds` metric to measure the time it takes to restore a rule group. #13974
+* [ENHANCEMENT] OTLP: Improve remote write format translation performance by using label set hashes for metric identifiers instead of string based ones. #14006 #13991
+* [ENHANCEMENT] TSDB: Optimize querying with regexp matchers. #13620
+* [BUGFIX] OTLP: Don't generate target_info unless there are metrics and at least one identifying label is defined. #13991
+* [BUGFIX] Scrape: Do no try to ingest native histograms when the native histograms feature is turned off. This happened when protobuf scrape was enabled by for example the created time feature. #13987
+* [BUGFIX] Scaleway SD: Use the instance's public IP if no private IP is available as the `__address__` meta label. #13941
+* [BUGFIX] Query logger: Do not leak file descriptors on error. #13948
+* [BUGFIX] TSDB: Let queries with heavy regex matches be cancelled and not use up the CPU. #14096 #14103 #14118 #14199
+* [BUGFIX] API: Do not warn if result count is equal to the limit, only when exceeding the limit for the series, label-names and label-values APIs. #14116
+* [BUGFIX] TSDB: Fix head stats and hooks when replaying a corrupted snapshot. #14079
+
+## 2.52.1 / 2024-05-29
+
+* [BUGFIX] Linode SD: Fix partial fetch when discovery would return more than 500 elements. #14141
+
+## 2.52.0 / 2024-05-07
+
+* [CHANGE] TSDB: Fix the predicate checking for blocks which are beyond the retention period to include the ones right at the retention boundary. #9633
+* [CHANGE] Scrape: Multiple samples (even with different timestamps) are treated as duplicates during one scrape.
+* [FEATURE] Kubernetes SD: Add a new metric `prometheus_sd_kubernetes_failures_total` to track failed requests to Kubernetes API. #13554
+* [FEATURE] Kubernetes SD: Add node and zone metadata labels when using the endpointslice role. #13935
+* [FEATURE] Azure SD/Remote Write: Allow usage of Azure authorization SDK. #13099
+* [FEATURE] Alerting: Support native histogram templating. #13731
+* [FEATURE] Linode SD: Support IPv6 range discovery and region filtering. #13774
+* [ENHANCEMENT] PromQL: Performance improvements for queries with regex matchers. #13461
+* [ENHANCEMENT] PromQL: Performance improvements when using aggregation operators. #13744
+* [ENHANCEMENT] PromQL: Validate label_join destination label. #13803
+* [ENHANCEMENT] Scrape: Increment `prometheus_target_scrapes_sample_duplicate_timestamp_total` metric on duplicated series during one scrape. #12933
+* [ENHANCEMENT] TSDB: Many improvements in performance. #13742 #13673 #13782
+* [ENHANCEMENT] TSDB: Pause regular block compactions if the head needs to be compacted (prioritize head as it increases memory consumption). #13754
+* [ENHANCEMENT] Observability: Improved logging during signal handling termination. #13772
+* [ENHANCEMENT] Observability: All log lines for drop series use "num_dropped" key consistently. #13823
+* [ENHANCEMENT] Observability: Log chunk snapshot and mmapped chunk replay duration during WAL replay. #13838
+* [ENHANCEMENT] Observability: Log if the block is being created from WBL during compaction. #13846
+* [BUGFIX] PromQL: Fix inaccurate sample number statistic when querying histograms. #13667
+* [BUGFIX] PromQL: Fix `histogram_stddev` and `histogram_stdvar` for cases where the histogram has negative buckets. #13852
+* [BUGFIX] PromQL: Fix possible duplicated label name and values in a metric result for specific queries. #13845
+* [BUGFIX] Scrape: Fix setting native histogram schema factor during scrape. #13846
+* [BUGFIX] TSDB: Fix counting of histogram samples when creating WAL checkpoint stats. #13776
+* [BUGFIX] TSDB: Fix cases of compacting empty heads. #13755
+* [BUGFIX] TSDB: Count float histograms in WAL checkpoint. #13844
+* [BUGFIX] Remote Read: Fix memory leak due to broken requests. #13777
+* [BUGFIX] API: Stop building response for `/api/v1/series/` when the API request was cancelled. #13766
+* [BUGFIX] promtool: Fix panic on `promtool tsdb analyze --extended` when no native histograms are present. #13976
+
+## 2.51.2 / 2024-04-09
+
+Bugfix release.
+
+[BUGFIX] Notifier: could hang when using relabeling on alerts #13861
+
+## 2.51.1 / 2024-03-27
+
+Bugfix release.
+
+* [BUGFIX] PromQL: Re-instate validation of label_join destination label #13803
+* [BUGFIX] Scraping (experimental native histograms): Fix handling of the min bucket factor on sync of targets #13846
+* [BUGFIX] PromQL: Some queries could return the same series twice (library use only) #13845
+
+## 2.51.0 / 2024-03-18
+
+This version is built with Go 1.22.1.
+
+There is a new optional build tag "dedupelabels", which should reduce memory consumption (#12304).
+It is off by default; there will be an optional alternative image to try it out.
+
+* [CHANGE] Scraping: Do experimental timestamp alignment even if tolerance is bigger than 1% of scrape interval #13624, #13737
+* [FEATURE] Alerting: Relabel rules for AlertManagerConfig; allows routing alerts to different alertmanagers #12551, #13735
+* [FEATURE] API: add limit param to series, label-names and label-values APIs #13396
+* [FEATURE] UI (experimental native histograms): Add native histogram chart to Table view #13658
+* [FEATURE] Promtool: Add a "tsdb dump-openmetrics" to dump in OpenMetrics format. #13194
+* [FEATURE] PromQL (experimental native histograms): Add histogram_avg function #13467
+* [ENHANCEMENT] Rules: Evaluate independent rules concurrently #12946, #13527
+* [ENHANCEMENT] Scraping (experimental native histograms): Support exemplars #13488
+* [ENHANCEMENT] Remote Write: Disable resharding during active retry backoffs #13562
+* [ENHANCEMENT] Observability: Add native histograms to latency/duration metrics #13681
+* [ENHANCEMENT] Observability: Add 'type' label to prometheus_tsdb_head_out_of_order_samples_appended_total #13607
+* [ENHANCEMENT] API: Faster generation of targets into JSON #13469, #13484
+* [ENHANCEMENT] Scraping, API: Use faster compression library #10782
+* [ENHANCEMENT] OpenTelemetry: Performance improvements in OTLP parsing #13627
+* [ENHANCEMENT] PromQL: Optimisations to reduce CPU and memory #13448, #13536
+* [BUGFIX] PromQL: Constrain extrapolation in rate() to half of sample interval #13725
+* [BUGFIX] Remote Write: Stop slowing down when a new WAL segment is created #13583, #13628
+* [BUGFIX] PromQL: Fix wrongly scoped range vectors with @ modifier #13559
+* [BUGFIX] Kubernetes SD: Pod status changes were not discovered by Endpoints service discovery #13337
+* [BUGFIX] Azure SD: Fix 'error: parameter virtualMachineScaleSetName cannot be empty' (#13702)
+* [BUGFIX] Remote Write: Fix signing for AWS sigv4 transport #13497
+* [BUGFIX] Observability: Exemplars emitted by Prometheus use "trace_id" not "traceID" #13589
+
+## 2.50.1 / 2024-02-26
+
+* [BUGFIX] API: Fix metadata API using wrong field names. #13633
+
+## 2.50.0 / 2024-02-22
+
+* [CHANGE] Remote Write: Error `storage.ErrTooOldSample` is now generating HTTP error 400 instead of HTTP error 500. #13335
+* [FEATURE] Remote Write: Drop old inmemory samples. Activated using the config entry `sample_age_limit`. #13002
+* [FEATURE] **Experimental**: Add support for ingesting zeros as created timestamps. (enabled under the feature-flag `created-timestamp-zero-ingestion`). #12733 #13279
+* [FEATURE] Promtool: Add `analyze` histograms command. #12331
+* [FEATURE] TSDB/compaction: Add a way to enable overlapping compaction. #13282 #13393 #13398
+* [FEATURE] Add automatic memory limit handling. Activated using the feature flag. `auto-gomemlimit` #13395
+* [ENHANCEMENT] Promtool: allow specifying multiple matchers in `promtool tsdb dump`. #13296
+* [ENHANCEMENT] PromQL: Restore more efficient version of `NewPossibleNonCounterInfo` annotation. #13022
+* [ENHANCEMENT] Kuma SD: Extend configuration to allow users to specify client ID. #13278
+* [ENHANCEMENT] PromQL: Use natural sort in `sort_by_label` and `sort_by_label_desc`. This is **experimental**. #13411
+* [ENHANCEMENT] Native Histograms: support `native_histogram_min_bucket_factor` in scrape_config. #13222
+* [ENHANCEMENT] Native Histograms: Issue warning if histogramRate is applied to the wrong kind of histogram. #13392
+* [ENHANCEMENT] TSDB: Make transaction isolation data structures smaller. #13015
+* [ENHANCEMENT] TSDB/postings: Optimize merge using Loser Tree. #12878
+* [ENHANCEMENT] TSDB: Simplify internal series delete function. #13261
+* [ENHANCEMENT] Agent: Performance improvement by making the global hash lookup table smaller. #13262
+* [ENHANCEMENT] PromQL: faster execution of metric functions, e.g. abs(), rate() #13446
+* [ENHANCEMENT] TSDB: Optimize label values with matchers by taking shortcuts. #13426
+* [ENHANCEMENT] Kubernetes SD: Check preconditions earlier and avoid unnecessary checks or iterations in kube_sd. #13408
+* [ENHANCEMENT] Promtool: Improve visibility for `promtool test rules` with JSON colored formatting. #13342
+* [ENHANCEMENT] Consoles: Exclude iowait and steal from CPU Utilisation. #9593
+* [ENHANCEMENT] Various improvements and optimizations on Native Histograms. #13267, #13215, #13276 #13289, #13340
+* [BUGFIX] Scraping: Fix quality value in HTTP Accept header. #13313
+* [BUGFIX] UI: Fix usage of the function `time()` that was crashing. #13371
+* [BUGFIX] Azure SD: Fix SD crashing when it finds a VM scale set. #13578
+
+## 2.49.1 / 2024-01-15
+
+* [BUGFIX] TSDB: Fixed a wrong `q=` value in scrape accept header #13313
+
+## 2.49.0 / 2024-01-15
+
+* [FEATURE] Promtool: Add `--run` flag promtool test rules command. #12206
+* [FEATURE] SD: Add support for `NS` records to DNS SD. #13219
+* [FEATURE] UI: Add heatmap visualization setting in the Graph tab, useful histograms. #13096 #13371
+* [FEATURE] Scraping: Add `scrape_config.enable_compression` (default true) to disable gzip compression when scraping the target. #13166
+* [FEATURE] PromQL: Add a `promql-experimental-functions` feature flag containing some new experimental PromQL functions. #13103 NOTE: More experimental functions might be added behind the same feature flag in the future. Added functions:
+  * Experimental `mad_over_time` (median absolute deviation around the median) function. #13059
+  * Experimental `sort_by_label` and `sort_by_label_desc` functions allowing sorting returned series by labels. #11299
+* [FEATURE] SD: Add `__meta_linode_gpus` label to Linode SD. #13097
+* [FEATURE] API: Add `exclude_alerts` query parameter to `/api/v1/rules` to only return recording rules. #12999
+* [FEATURE] TSDB: --storage.tsdb.retention.time flag value is now exposed as a `prometheus_tsdb_retention_limit_seconds` metric. #12986
+* [FEATURE] Scraping: Add ability to specify priority of scrape protocols to accept during scrape (e.g. to scrape Prometheus proto format for certain jobs). This can be changed by setting `global.scrape_protocols` and `scrape_config.scrape_protocols`. #12738
+* [ENHANCEMENT] Scraping: Automated handling of scraping histograms that violate `scrape_config.native_histogram_bucket_limit` setting. #13129
+* [ENHANCEMENT] Scraping: Optimized memory allocations when scraping. #12992
+* [ENHANCEMENT] SD: Added cache for Azure SD to avoid rate-limits. #12622
+* [ENHANCEMENT] TSDB: Various improvements to OOO exemplar scraping. E.g. allowing ingestion of exemplars with the same timestamp, but with different labels. #13021
+* [ENHANCEMENT] API: Optimize `/api/v1/labels` and `/api/v1/label/<label_name>/values` when 1 set of matchers are used. #12888
+* [ENHANCEMENT] TSDB: Various optimizations for TSDB block index, head mmap chunks and WAL, reducing latency and memory allocations (improving API calls, compaction queries etc). #12997 #13058 #13056 #13040
+* [ENHANCEMENT] PromQL: Optimize memory allocations and latency when querying float histograms. #12954
+* [ENHANCEMENT] Rules: Instrument TraceID in log lines for rule evaluations. #13034
+* [ENHANCEMENT] PromQL: Optimize memory allocations in query_range calls. #13043
+* [ENHANCEMENT] Promtool: unittest interval now defaults to evaluation_intervals when not set. #12729
+* [BUGFIX] SD: Fixed Azure SD public IP reporting #13241
+* [BUGFIX] API: Fix inaccuracies in posting cardinality statistics. #12653
+* [BUGFIX] PromQL: Fix inaccuracies of `histogram_quantile` with classic histograms. #13153
+* [BUGFIX] TSDB: Fix rare fails or inaccurate queries with OOO samples. #13115
+* [BUGFIX] TSDB: Fix rare panics on append commit when exemplars are used. #13092
+* [BUGFIX] TSDB: Fix exemplar WAL storage, so remote write can send/receive samples before exemplars. #13113
+* [BUGFIX] Mixins: Fix `url` filter on remote write dashboards. #10721
+* [BUGFIX] PromQL/TSDB: Various fixes to float histogram operations. #12891 #12977 #12609 #13190 #13189 #13191 #13201 #13212 #13208
+* [BUGFIX] Promtool: Fix int32 overflow issues for 32-bit architectures. #12978
+* [BUGFIX] SD: Fix Azure VM Scale Set NIC issue. #13283
+
+## 2.48.1 / 2023-12-07
+
+* [BUGFIX] TSDB: Make the wlog watcher read segments synchronously when not tailing. #13224
+* [BUGFIX] Agent: Participate in notify calls (fixes slow down in remote write handling introduced in 2.45). #13223
+
+## 2.48.0 / 2023-11-16
+
+* [CHANGE] Remote-write: respect Retry-After header on 5xx errors. #12677
+* [FEATURE] Alerting: Add AWS SigV4 authentication support for Alertmanager endpoints. #12774
+* [FEATURE] Promtool: Add support for histograms in the TSDB dump command. #12775
+* [FEATURE] PromQL: Add warnings (and annotations) to PromQL query results. #12152 #12982 #12988 #13012
+* [FEATURE] Remote-write: Add Azure AD OAuth authentication support for remote write requests. #12572
+* [ENHANCEMENT] Remote-write: Add a header to count retried remote write requests. #12729
+* [ENHANCEMENT] TSDB: Improve query performance by re-using iterator when moving between series. #12757
+* [ENHANCEMENT] UI: Move /targets page discovered labels to expandable section #12824
+* [ENHANCEMENT] TSDB: Optimize WBL loading by not sending empty buffers over channel. #12808
+* [ENHANCEMENT] TSDB: Reply WBL mmap markers concurrently. #12801
+* [ENHANCEMENT] Promtool: Add support for specifying series matchers in the TSDB analyze command. #12842
+* [ENHANCEMENT] PromQL: Prevent Prometheus from overallocating memory on subquery with large amount of steps. #12734
+* [ENHANCEMENT] PromQL: Add warning when monotonicity is forced in the input to histogram_quantile. #12931
+* [ENHANCEMENT] Scraping: Optimize sample appending by reducing garbage. #12939
+* [ENHANCEMENT] Storage: Reduce memory allocations in queries that merge series sets. #12938
+* [ENHANCEMENT] UI: Show group interval in rules display. #12943
+* [ENHANCEMENT] Scraping: Save memory when scraping by delaying creation of buffer. #12953
+* [ENHANCEMENT] Agent: Allow ingestion of out-of-order samples. #12897
+* [ENHANCEMENT] Promtool: Improve support for native histograms in TSDB analyze command. #12869
+* [ENHANCEMENT] Scraping: Add configuration option for tracking staleness of scraped timestamps. #13060
+* [BUGFIX] SD: Ensure that discovery managers are properly canceled. #10569
+* [BUGFIX] TSDB: Fix PostingsForMatchers race with creating new series. #12558
+* [BUGFIX] TSDB: Fix handling of explicit counter reset header in histograms. #12772
+* [BUGFIX] SD: Validate HTTP client configuration in HTTP, EC2, Azure, Uyuni, PuppetDB, and Lightsail SDs. #12762 #12811 #12812 #12815 #12814 #12816
+* [BUGFIX] TSDB: Fix counter reset edgecases causing native histogram panics. #12838
+* [BUGFIX] TSDB: Fix duplicate sample detection at chunk size limit. #12874
+* [BUGFIX] Promtool: Fix errors not being reported in check rules command. #12715
+* [BUGFIX] TSDB: Avoid panics reported in logs when head initialization takes a long time. #12876
+* [BUGFIX] TSDB: Ensure that WBL is repaired when possible. #12406
+* [BUGFIX] Storage: Fix crash caused by incorrect mixed samples handling. #13055
+* [BUGFIX] TSDB: Fix compactor failures by adding min time to histogram chunks. #13062
+
+## 2.47.1 / 2023-10-04
+
+* [BUGFIX] Fix duplicate sample detection at chunk size limit #12874
+
+## 2.47.0 / 2023-09-06
+
+This release adds an experimental OpenTelemetry (OTLP) Ingestion feature,
+and also new setting `keep_dropped_targets` to limit the amount of dropped
+targets held in memory. This defaults to 0 meaning 'no limit', so we encourage
+users with large Prometheus to try setting a limit such as 100.
+
+* [FEATURE] Web: Add OpenTelemetry (OTLP) Ingestion endpoint. #12571 #12643
+* [FEATURE] Scraping: Optionally limit detail on dropped targets, to save memory. #12647
+* [ENHANCEMENT] TSDB: Write head chunks to disk in the background to reduce blocking. #11818
+* [ENHANCEMENT] PromQL: Speed up aggregate and function queries. #12682
+* [ENHANCEMENT] PromQL: More efficient evaluation of query with `timestamp()`. #12579
+* [ENHANCEMENT] API: Faster streaming of Labels to JSON. #12598
+* [ENHANCEMENT] Agent: Memory pooling optimisation. #12651
+* [ENHANCEMENT] TSDB: Prevent storage space leaks due to terminated snapshots on shutdown. #12664
+* [ENHANCEMENT] Histograms: Refactoring and optimisations. #12352 #12584 #12596 #12711 #12054
+* [ENHANCEMENT] Histograms: Add `histogram_stdvar` and `histogram_stddev` functions. #12614
+* [ENHANCEMENT] Remote-write: add http.resend_count tracing attribute. #12676
+* [ENHANCEMENT] TSDB: Support native histograms in snapshot on shutdown. #12722
+* [BUGFIX] TSDB/Agent: ensure that new series get written to WAL on rollback. #12592
+* [BUGFIX] Scraping: fix infinite loop on exemplar in protobuf format. #12737
+
+## 2.46.0 / 2023-07-25
+
+* [FEATURE] Promtool: Add PromQL format and label matcher set/delete commands to promtool. #11411
+* [FEATURE] Promtool: Add push metrics command. #12299
+* [ENHANCEMENT] Promtool: Read from stdin if no filenames are provided in check rules. #12225
+* [ENHANCEMENT] Hetzner SD: Support larger ID's that will be used by Hetzner in September. #12569
+* [ENHANCEMENT] Kubernetes SD: Add more labels for endpointslice and endpoints role. #10914
+* [ENHANCEMENT] Kubernetes SD: Do not add pods to target group if the PodIP status is not set. #11642
+* [ENHANCEMENT] OpenStack SD: Include instance image ID in labels. #12502
+* [ENHANCEMENT] Remote Write receiver: Validate the metric names and labels. #11688
+* [ENHANCEMENT] Web: Initialize `prometheus_http_requests_total` metrics with `code` label set to `200`. #12472
+* [ENHANCEMENT] TSDB: Add Zstandard compression option for wlog. #11666
+* [ENHANCEMENT] TSDB: Support native histograms in snapshot on shutdown. #12258
+* [ENHANCEMENT] Labels: Avoid compiling regexes that are literal. #12434
+* [BUGFIX] Histograms: Fix parsing of float histograms without zero bucket. #12577
+* [BUGFIX] Histograms: Fix scraping native and classic histograms missing some histograms. #12554
+* [BUGFIX] Histograms: Enable ingestion of multiple exemplars per sample. 12557
+* [BUGFIX] File SD: Fix path handling in File-SD watcher to allow directory monitoring on Windows. #12488
+* [BUGFIX] Linode SD: Cast `InstanceSpec` values to `int64` to avoid overflows on 386 architecture. #12568
+* [BUGFIX] PromQL Engine: Include query parsing in active-query tracking. #12418
+* [BUGFIX] TSDB: Handle TOC parsing failures. #10623
+
+## 2.45.0 / 2023-06-23
+
+This release is a LTS (Long-Term Support) release of Prometheus and will
+receive security, documentation and bugfix patches for at least 12 months.
+Please read more about our LTS release cycle at
+<https://prometheus.io/docs/introduction/release-cycle/>.
+
+* [FEATURE] API: New limit parameter to limit the number of items returned by `/api/v1/status/tsdb` endpoint. #12336
+* [FEATURE] Config: Add limits to global config. #12126
+* [FEATURE] Consul SD: Added support for `path_prefix`. #12372
+* [FEATURE] Native histograms: Add option to scrape both classic and native histograms. #12350
+* [FEATURE] Native histograms: Added support for two more arithmetic operators `avg_over_time` and `sum_over_time`. #12262
+* [FEATURE] Promtool: When providing the block id, only one block will be loaded and analyzed. #12031
+* [FEATURE] Remote-write: New Azure ad configuration to support remote writing directly to Azure Monitor workspace. #11944
+* [FEATURE] TSDB: Samples per chunk are now configurable with flag `storage.tsdb.samples-per-chunk`. By default set to its former value 120. #12055
+* [ENHANCEMENT] Native histograms: bucket size can now be limited to avoid scrape fails. #12254
+* [ENHANCEMENT] TSDB: Dropped series are now deleted from the WAL sooner. #12297
+* [BUGFIX] Native histograms: ChunkSeries iterator now checks if a new sample can be appended to the open chunk. #12185
+* [BUGFIX] Native histograms: Fix Histogram Appender `Appendable()` segfault. #12357
+* [BUGFIX] Native histograms: Fix setting reset header to gauge histograms in seriesToChunkEncoder. #12329
+* [BUGFIX] TSDB: Tombstone intervals are not modified after Get() call. #12245
+* [BUGFIX] TSDB: Use path/filepath to set the WAL directory. #12349
+
+## 2.44.0 / 2023-05-13
+
+This version is built with Go tag `stringlabels`, to use the smaller data
+structure for Labels that was optional in the previous release. For more
+details about this code change see #10991.
+
+* [CHANGE] Remote-write: Raise default samples per send to 2,000. #12203
+* [FEATURE] Remote-read: Handle native histograms. #12085, #12192
+* [FEATURE] Promtool: Health and readiness check of prometheus server in CLI. #12096
+* [FEATURE] PromQL: Add `query_samples_total` metric, the total number of samples loaded by all queries. #12251
+* [ENHANCEMENT] Storage: Optimise buffer used to iterate through samples. #12326
+* [ENHANCEMENT] Scrape: Reduce memory allocations on target labels. #12084
+* [ENHANCEMENT] PromQL: Use faster heap method for `topk()` / `bottomk()`. #12190
+* [ENHANCEMENT] Rules API: Allow filtering by rule name. #12270
+* [ENHANCEMENT] Native Histograms: Various fixes and improvements. #11687, #12264, #12272
+* [ENHANCEMENT] UI: Search of scraping pools is now case-insensitive. #12207
+* [ENHANCEMENT] TSDB: Add an affirmative log message for successful WAL repair. #12135
+* [BUGFIX] TSDB: Block compaction failed when shutting down. #12179
+* [BUGFIX] TSDB: Out-of-order chunks could be ignored if the write-behind log was deleted. #12127
+
+## 2.43.1 / 2023-05-03
+
+* [BUGFIX] Labels: `Set()` after `Del()` would be ignored, which broke some relabeling rules. #12322
+
+## 2.43.0 / 2023-03-21
+
+We are working on some performance improvements in Prometheus, which are only
+built into Prometheus when compiling it using the Go tag `stringlabels`
+(therefore they are not shipped in the default binaries). It uses a data
+structure for labels that uses a single string to hold all the label/values,
+resulting in a smaller heap size and some speedups in most cases. We would like
+to encourage users who are interested in these improvements to help us measure
+the gains on their production architecture. We are providing release artefacts
+`2.43.0+stringlabels` and Docker images tagged `v2.43.0-stringlabels` with those
+improvements for testing. #10991
+
+* [FEATURE] Promtool: Add HTTP client configuration to query commands. #11487
+* [FEATURE] Scrape: Add `scrape_config_files` to include scrape configs from different files. #12019
+* [FEATURE] HTTP client: Add `no_proxy` to exclude URLs from proxied requests. #12098
+* [FEATURE] HTTP client: Add `proxy_from_environment` to read proxies from env variables. #12098
+* [ENHANCEMENT] API: Add support for setting lookback delta per query via the API. #12088
+* [ENHANCEMENT] API: Change HTTP status code from 503/422 to 499 if a request is canceled. #11897
+* [ENHANCEMENT] Scrape: Allow exemplars for all metric types. #11984
+* [ENHANCEMENT] TSDB: Add metrics for head chunks and WAL folders size. #12013
+* [ENHANCEMENT] TSDB: Automatically remove incorrect snapshot with index that is ahead of WAL. #11859
+* [ENHANCEMENT] TSDB: Improve Prometheus parser error outputs to be more comprehensible. #11682
+* [ENHANCEMENT] UI: Scope `group by` labels to metric in autocompletion. #11914
+* [BUGFIX] Scrape: Fix `prometheus_target_scrape_pool_target_limit` metric not set before reloading. #12002
+* [BUGFIX] TSDB: Correctly update `prometheus_tsdb_head_chunks_removed_total` and `prometheus_tsdb_head_chunks` metrics when reading WAL. #11858
+* [BUGFIX] TSDB: Use the correct unit (seconds) when recording out-of-order append deltas in the `prometheus_tsdb_sample_ooo_delta` metric. #12004
+
+## 2.42.0 / 2023-01-31
+
+This release comes with a bunch of feature coverage for native histograms and breaking changes.
+
+If you are trying native histograms already, we recommend you remove the `wal` directory when upgrading.
+Because the old WAL record for native histograms is not backward compatible in v2.42.0, this will lead to some data loss for the latest data.
+
+Additionally, if you scrape "float histograms" or use recording rules on native histograms in v2.42.0 (which writes float histograms),
+it is a one-way street since older versions do not support float histograms.
+
+* [CHANGE] **breaking** TSDB: Changed WAL record format for the experimental native histograms. #11783
+* [FEATURE] Add 'keep_firing_for' field to alerting rules. #11827
+* [FEATURE] Promtool: Add support of selecting timeseries for TSDB dump. #11872
+* [ENHANCEMENT] Agent: Native histogram support. #11842
+* [ENHANCEMENT] Rules: Support native histograms in recording rules. #11838
+* [ENHANCEMENT] SD: Add container ID as a meta label for pod targets for Kubernetes. #11844
+* [ENHANCEMENT] SD: Add VM size label to azure service discovery. #11650
+* [ENHANCEMENT] Support native histograms in federation. #11830
+* [ENHANCEMENT] TSDB: Add gauge histogram support. #11783 #11840 #11814
+* [ENHANCEMENT] TSDB/Scrape: Support FloatHistogram that represents buckets as float64 values. #11522 #11817 #11716
+* [ENHANCEMENT] UI: Show individual scrape pools on /targets page. #11142
+
+## 2.41.0 / 2022-12-20
+
+* [FEATURE] Relabeling: Add `keepequal` and `dropequal` relabel actions. #11564
+* [FEATURE] Add support for HTTP proxy headers. #11712
+* [ENHANCEMENT] Reload private certificates when changed on disk. #11685
+* [ENHANCEMENT] Add `max_version` to specify maximum TLS version in `tls_config`. #11685
+* [ENHANCEMENT] Add `goos` and `goarch` labels to `prometheus_build_info`. #11685
+* [ENHANCEMENT] SD: Add proxy support for EC2 and LightSail SDs #11611
+* [ENHANCEMENT] SD: Add new metric `prometheus_sd_file_watcher_errors_total`. #11066
+* [ENHANCEMENT] Remote Read: Use a pool to speed up marshalling. #11357
+* [ENHANCEMENT] TSDB: Improve handling of tombstoned chunks in iterators. #11632
+* [ENHANCEMENT] TSDB: Optimize postings offset table reading. #11535
+* [BUGFIX] Scrape: Validate the metric name, label names, and label values after relabeling. #11074
+* [BUGFIX] Remote Write receiver and rule manager: Fix error handling. #11727
+
+## 2.40.7 / 2022-12-14
+
+* [BUGFIX] Use Windows native DNS resolver. #11704
+* [BUGFIX] TSDB: Fix queries involving negative buckets of native histograms. #11699
+
+## 2.40.6 / 2022-12-09
+
+* [SECURITY] Security upgrade from go and upstream dependencies that include
+  security fixes to the net/http and os packages. #11691
+
+## 2.40.5 / 2022-12-01
+
+* [BUGFIX] TSDB: Fix queries involving native histograms due to improper reset of iterators. #11643
+
+## 2.40.4 / 2022-11-29
+
+* [SECURITY] Fix basic authentication bypass vulnerability (CVE-2022-46146). GHSA-4v48-4q5m-8vx4
+
+## 2.40.3 / 2022-11-23
+
+* [BUGFIX] TSDB: Fix compaction after a deletion is called. #11623
+
+## 2.40.2 / 2022-11-16
+
+* [BUGFIX] UI: Fix black-on-black metric name color in dark mode. #11572
+
+## 2.40.1 / 2022-11-09
+
+* [BUGFIX] TSDB: Fix alignment for atomic int64 for 32 bit architecture. #11547
+* [BUGFIX] Scrape: Fix accept headers. #11552
+
+## 2.40.0 / 2022-11-08
+
+This release introduces an experimental, native way of representing and storing histograms.
+
+It can be enabled in Prometheus via `--enable-feature=native-histograms` to accept native histograms.
+Enabling native histograms will also switch the preferred exposition format to protobuf.
+
+To instrument your application with native histograms, use the `main` branch of `client_golang` (this will change for the final release when v1.14.0 of client_golang will be out), and set the `NativeHistogramBucketFactor` in your `HistogramOpts` (`1.1` is a good starting point).
+Your existing histograms won't switch to native histograms until `NativeHistogramBucketFactor` is set.
+
+* [FEATURE] Add **experimental** support for native histograms. Enable with the flag `--enable-feature=native-histograms`. #11447
+* [FEATURE] SD: Add service discovery for OVHcloud. #10802
+* [ENHANCEMENT] Kubernetes SD: Use protobuf encoding. #11353
+* [ENHANCEMENT] TSDB: Use golang.org/x/exp/slices for improved sorting speed. #11054 #11318 #11380
+* [ENHANCEMENT] Consul SD: Add enterprise admin partitions. Adds `__meta_consul_partition` label. Adds `partition` config in `consul_sd_config`. #11482
+* [BUGFIX] API: Fix API error codes for `/api/v1/labels` and `/api/v1/series`. #11356
+
+## 2.39.2 / 2022-11-09
+
+* [BUGFIX] TSDB: Fix alignment for atomic int64 for 32 bit architecture. #11547
+
+## 2.39.1 / 2022-10-07
+
+* [BUGFIX] Rules: Fix notifier relabel changing the labels on active alerts. #11427
+
+## 2.39.0 / 2022-10-05
+
+* [FEATURE] **experimental** TSDB: Add support for ingesting out-of-order samples. This is configured via `out_of_order_time_window` field in the config file; check config file docs for more info. #11075
+* [ENHANCEMENT] API: `/-/healthy` and `/-/ready` API calls now also respond to a `HEAD` request on top of existing `GET` support. #11160
+* [ENHANCEMENT] PuppetDB SD: Add `__meta_puppetdb_query` label. #11238
+* [ENHANCEMENT] AWS EC2 SD: Add `__meta_ec2_region` label. #11326
+* [ENHANCEMENT] AWS Lightsail SD: Add `__meta_lightsail_region` label. #11326
+* [ENHANCEMENT] Scrape: Optimise relabeling by re-using memory. #11147
+* [ENHANCEMENT] TSDB: Improve WAL replay timings. #10973 #11307 #11319
+* [ENHANCEMENT] TSDB: Optimise memory by not storing unnecessary data in the memory. #11280 #11288 #11296
+* [ENHANCEMENT] TSDB: Allow overlapping blocks by default. `--storage.tsdb.allow-overlapping-blocks` now has no effect. #11331
+* [ENHANCEMENT] UI: Click to copy label-value pair from query result to clipboard. #11229
+* [BUGFIX] TSDB: Turn off isolation for Head compaction to fix a memory leak. #11317
+* [BUGFIX] TSDB: Fix 'invalid magic number 0' error on Prometheus startup. #11338
+* [BUGFIX] PromQL: Properly close file descriptor when logging unfinished queries. #11148
+* [BUGFIX] Agent: Fix validation of flag options and prevent WAL from growing more than desired. #9876
+
+## 2.38.0 / 2022-08-16
+
+* [FEATURE]: Web: Add a `/api/v1/format_query` HTTP API endpoint that allows pretty-formatting PromQL expressions. #11036 #10544 #11005
+* [FEATURE]: UI: Add support for formatting PromQL expressions in the UI. #11039
+* [FEATURE]: DNS SD: Support MX records for discovering targets. #10099
+* [FEATURE]: Templates: Add `toTime()` template function that allows converting sample timestamps to Go `time.Time` values. #10993
+* [ENHANCEMENT]: Kubernetes SD: Add `__meta_kubernetes_service_port_number` meta label indicating the service port number. #11002 #11053
+* [ENHANCEMENT]: Kubernetes SD: Add `__meta_kubernetes_pod_container_image` meta label indicating the container image. #11034 #11146
+* [ENHANCEMENT]: PromQL: When a query panics, also log the query itself alongside the panic message. #10995
+* [ENHANCEMENT]: UI: Tweak colors in the dark theme to improve the contrast ratio. #11068
+* [ENHANCEMENT]: Web: Speed up calls to `/api/v1/rules` by avoiding locks and using atomic types instead. #10858
+* [ENHANCEMENT]: Scrape: Add a `no-default-scrape-port` feature flag, which omits or removes any default HTTP (`:80`) or HTTPS (`:443`) ports in the target's scrape address. #9523
+* [BUGFIX]: TSDB: In the WAL watcher metrics, expose the `type="exemplar"` label instead of `type="unknown"` for exemplar records. #11008
+* [BUGFIX]: TSDB: Fix race condition around allocating series IDs during chunk snapshot loading. #11099
+
+## 2.37.0 / 2022-07-14
+
+This release is a LTS (Long-Term Support) release of Prometheus and will
+receive security, documentation and bugfix patches for at least 6 months.
+Please read more about our LTS release cycle at
+<https://prometheus.io/docs/introduction/release-cycle/>.
+
+Following data loss by users due to lack of unified buffer cache in OpenBSD, we
+will no longer release Prometheus upstream for OpenBSD until a proper solution is
+found. #8799
+
+* [FEATURE] Nomad SD: New service discovery for Nomad built-in service discovery. #10915
+* [ENHANCEMENT] Kubernetes SD: Allow attaching node labels for endpoint role. #10759
+* [ENHANCEMENT] PromQL: Optimise creation of signature with/without labels. #10667
+* [ENHANCEMENT] TSDB: Memory optimizations. #10873 #10874
+* [ENHANCEMENT] TSDB: Reduce sleep time when reading WAL. #10859 #10878
+* [ENHANCEMENT] OAuth2: Add appropriate timeouts and User-Agent header. #11020
+* [BUGFIX] Alerting: Fix Alertmanager targets not being updated when alerts were queued. #10948
+* [BUGFIX] Hetzner SD: Make authentication files relative to Prometheus config file. #10813
+* [BUGFIX] Promtool: Fix `promtool check config` not erroring properly on failures. #10952
+* [BUGFIX] Scrape: Keep relabeled scrape interval and timeout on reloads. #10916
+* [BUGFIX] TSDB: Don't increment `prometheus_tsdb_compactions_failed_total` when context is canceled. #10772
+* [BUGFIX] TSDB: Fix panic if series is not found when deleting series. #10907
+* [BUGFIX] TSDB: Increase `prometheus_tsdb_mmap_chunk_corruptions_total` on out of sequence errors. #10406
+* [BUGFIX] Uyuni SD: Make authentication files relative to Prometheus configuration file and fix default configuration values. #10813
+
+## 2.36.2 / 2022-06-20
+
+* [BUGFIX] Fix serving of static assets like fonts and favicon. #10888
+
+## 2.36.1 / 2022-06-09
+
+* [BUGFIX] promtool: Add --lint-fatal option. #10840
+
+## 2.36.0 / 2022-05-30
+
+* [FEATURE] Add lowercase and uppercase relabel action. #10641
+* [FEATURE] SD: Add IONOS Cloud integration. #10514
+* [FEATURE] SD: Add Vultr integration. #10714
+* [FEATURE] SD: Add Linode SD failure count metric. #10673
+* [FEATURE] Add prometheus_ready metric. #10682
+* [ENHANCEMENT] Add stripDomain to template function. #10475
+* [ENHANCEMENT] UI: Enable active search through dropped targets. #10668
+* [ENHANCEMENT] promtool: support matchers when querying label values. #10727
+* [ENHANCEMENT] Add agent mode identifier. #9638
+* [BUGFIX] Changing TotalQueryableSamples from int to int64. #10549
+* [BUGFIX] tsdb/agent: Ignore duplicate exemplars. #10595
+* [BUGFIX] TSDB: Fix chunk overflow appending samples at a variable rate. #10607
+* [BUGFIX] Stop rule manager before TSDB is stopped. #10680
+
+## 2.35.0 / 2022-04-21
+
+This Prometheus release is built with go1.18, which contains two noticeable changes related to TLS:
+
+1. [TLS 1.0 and 1.1 disabled by default client-side](https://go.dev/doc/go1.18#tls10).
+Prometheus users can override this with the `min_version` parameter of [tls_config](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#tls_config).
+2. [Certificates signed with the SHA-1 hash function are rejected](https://go.dev/doc/go1.18#sha1). This doesn't apply to self-signed root certificates.
+
+* [CHANGE] TSDB: Delete `*.tmp` WAL files when Prometheus starts. #10317
+* [CHANGE] promtool: Add new flag `--lint` (enabled by default) for the commands `check rules` and `check config`, resulting in a new exit code (`3`) for linter errors. #10435
+* [FEATURE] Support for automatically setting the variable `GOMAXPROCS` to the container CPU limit. Enable with the flag `--enable-feature=auto-gomaxprocs`. #10498
+* [FEATURE] PromQL: Extend statistics with total and peak number of samples in a query. Additionally, per-step statistics are available with  --enable-feature=promql-per-step-stats and using `stats=all` in the query API.
+Enable with the flag `--enable-feature=per-step-stats`. #10369
+* [ENHANCEMENT] Prometheus is built with Go 1.18. #10501
+* [ENHANCEMENT] TSDB: more efficient sorting of postings read from WAL at startup. #10500
+* [ENHANCEMENT] Azure SD: Add metric to track Azure SD failures. #10476
+* [ENHANCEMENT] Azure SD: Add an optional `resource_group` configuration. #10365
+* [ENHANCEMENT] Kubernetes SD: Support `discovery.k8s.io/v1` `EndpointSlice` (previously only `discovery.k8s.io/v1beta1` `EndpointSlice` was supported). #9570
+* [ENHANCEMENT] Kubernetes SD: Allow attaching node metadata to discovered pods. #10080
+* [ENHANCEMENT] OAuth2: Support for using a proxy URL to fetch OAuth2 tokens. #10492
+* [ENHANCEMENT] Configuration: Add the ability to disable HTTP2. #10492
+* [ENHANCEMENT] Config: Support overriding minimum TLS version. #10610
+* [BUGFIX] Kubernetes SD: Explicitly include gcp auth from k8s.io. #10516
+* [BUGFIX] Fix OpenMetrics parser to sort uppercase labels correctly. #10510
+* [BUGFIX] UI: Fix scrape interval and duration tooltip not showing on target page. #10545
+* [BUGFIX] Tracing/GRPC: Set TLS credentials only when insecure is false. #10592
+* [BUGFIX] Agent: Fix ID collision when loading a WAL with multiple segments. #10587
+* [BUGFIX] Remote-write: Fix a deadlock between Batch and flushing the queue. #10608
+
+## 2.34.0 / 2022-03-15
+
+* [CHANGE] UI: Classic UI removed. #10208
+* [CHANGE] Tracing: Migrate from Jaeger to OpenTelemetry based tracing. #9724, #10203, #10276
+* [ENHANCEMENT] TSDB: Disable the chunk write queue by default and allow configuration with the experimental flag `--storage.tsdb.head-chunks-write-queue-size`. #10425
+* [ENHANCEMENT] HTTP SD: Add a failure counter. #10372
+* [ENHANCEMENT] Azure SD: Set Prometheus User-Agent on requests. #10209
+* [ENHANCEMENT] Uyuni SD: Reduce the number of logins to Uyuni. #10072
+* [ENHANCEMENT] Scrape: Log when an invalid media type is encountered during a scrape. #10186
+* [ENHANCEMENT] Scrape: Accept application/openmetrics-text;version=1.0.0 in addition to version=0.0.1. #9431
+* [ENHANCEMENT] Remote-read: Add an option to not use external labels as selectors for remote read. #10254
+* [ENHANCEMENT] UI: Optimize the alerts page and add a search bar. #10142
+* [ENHANCEMENT] UI: Improve graph colors that were hard to see. #10179
+* [ENHANCEMENT] Config: Allow escaping of `$` with `$$` when using environment variables with external labels. #10129
+* [BUGFIX] PromQL: Properly return an error from histogram_quantile when metrics have the same labelset. #10140
+* [BUGFIX] UI: Fix bug that sets the range input to the resolution. #10227
+* [BUGFIX] TSDB: Fix a query panic when `memory-snapshot-on-shutdown` is enabled. #10348
+* [BUGFIX] Parser: Specify type in metadata parser errors. #10269
+* [BUGFIX] Scrape: Fix label limit changes not applying. #10370
+
+## 2.33.5 / 2022-03-08
+
+The binaries published with this release are built with Go1.17.8 to avoid [CVE-2022-24921](https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2022-24921).
+
+* [BUGFIX] Remote-write: Fix deadlock between adding to queue and getting batch. #10395
+
+## 2.33.4 / 2022-02-22
+
+* [BUGFIX] TSDB: Fix panic when m-mapping head chunks onto the disk. #10316
+
+## 2.33.3 / 2022-02-11
+
+* [BUGFIX] Azure SD: Fix a regression when public IP Address isn't set. #10289
+
+## 2.33.2 / 2022-02-11
+
+* [BUGFIX] Azure SD: Fix panic when public IP Address isn't set. #10280
+* [BUGFIX] Remote-write: Fix deadlock when stopping a shard. #10279
+
+## 2.33.1 / 2022-02-02
+
+* [BUGFIX] SD: Fix _no such file or directory_ in K8s SD when not running inside K8s. #10235
+
+## 2.33.0 / 2022-01-29
+
+* [CHANGE] PromQL: Promote negative offset and `@` modifier to stable features. #10121
+* [CHANGE] Web: Promote remote-write-receiver to stable. #10119
+* [FEATURE] Config: Add `stripPort` template function. #10002
+* [FEATURE] Promtool: Add cardinality analysis to `check metrics`, enabled by flag `--extended`. #10045
+* [FEATURE] SD: Enable target discovery in own K8s namespace. #9881
+* [FEATURE] SD: Add provider ID label in K8s SD. #9603
+* [FEATURE] Web: Add limit field to the rules API. #10152
+* [ENHANCEMENT] Remote-write: Avoid allocations by buffering concrete structs instead of interfaces. #9934
+* [ENHANCEMENT] Remote-write: Log time series details for out-of-order samples in remote write receiver. #9894
+* [ENHANCEMENT] Remote-write: Shard up more when backlogged. #9274
+* [ENHANCEMENT] TSDB: Use simpler map key to improve exemplar ingest performance. #10111
+* [ENHANCEMENT] TSDB: Avoid allocations when popping from the intersected postings heap. #10092
+* [ENHANCEMENT] TSDB: Make chunk writing non-blocking, avoiding latency spikes in remote-write. #10051
+* [ENHANCEMENT] TSDB: Improve label matching performance. #9907
+* [ENHANCEMENT] UI: Optimize the service discovery page and add a search bar. #10131
+* [ENHANCEMENT] UI: Optimize the target page and add a search bar. #10103
+* [BUGFIX] Promtool: Make exit codes more consistent. #9861
+* [BUGFIX] Promtool: Fix flakiness of rule testing. #8818
+* [BUGFIX] Remote-write: Update `prometheus_remote_storage_queue_highest_sent_timestamp_seconds` metric when write irrecoverably fails. #10102
+* [BUGFIX] Storage: Avoid panic in `BufferedSeriesIterator`. #9945
+* [BUGFIX] TSDB: CompactBlockMetas should produce correct mint/maxt for overlapping blocks. #10108
+* [BUGFIX] TSDB: Fix logging of exemplar storage size. #9938
+* [BUGFIX] UI: Fix overlapping click targets for the alert state checkboxes. #10136
+* [BUGFIX] UI: Fix _Unhealthy_ filter on target page to actually display only _Unhealthy_ targets. #10103
+* [BUGFIX] UI: Fix autocompletion when expression is empty. #10053
+* [BUGFIX] TSDB: Fix deadlock from simultaneous GC and write. #10166
+
+## 2.32.1 / 2021-12-17
+
+* [BUGFIX] Scrape: Fix reporting metrics when sample limit is reached during the report. #9996
+* [BUGFIX] Scrape: Ensure that scrape interval and scrape timeout are always set. #10023
+* [BUGFIX] TSDB: Expose and fix bug in iterators' `Seek()` method. #10030
+
+## 2.32.0 / 2021-12-09
+
+This release introduces the Prometheus Agent, a new mode of operation for
+Prometheus optimized for remote-write only scenarios. In this mode, Prometheus
+does not generate blocks on the local filesystem and is not queryable locally.
+Enable with `--enable-feature=agent`.
+
+Learn more about the Prometheus Agent in our [blog post](https://prometheus.io/blog/2021/11/16/agent/).
+
+* [CHANGE] Remote-write: Change default max retry time from 100ms to 5 seconds. #9634
+* [FEATURE] Agent: New mode of operation optimized for remote-write only scenarios, without local storage. Enable with `--enable-feature=agent`. #8785 #9851 #9664 #9939 #9941 #9943
+* [FEATURE] Promtool: Add `promtool check service-discovery` command. #8970
+* [FEATURE] UI: Add search in metrics dropdown. #9629
+* [FEATURE] Templates: Add parseDuration to template functions. #8817
+* [ENHANCEMENT] Promtool: Improve test output. #8064
+* [ENHANCEMENT] PromQL: Use kahan summation for better numerical stability. #9588
+* [ENHANCEMENT] Remote-write: Reuse memory for marshalling. #9412
+* [ENHANCEMENT] Scrape: Add `scrape_body_size_bytes` scrape metric behind the `--enable-feature=extra-scrape-metrics` flag. #9569
+* [ENHANCEMENT] TSDB: Add windows arm64 support. #9703
+* [ENHANCEMENT] TSDB: Optimize query by skipping unneeded sorting in TSDB. #9673
+* [ENHANCEMENT] Templates: Support int and uint as datatypes for template formatting. #9680
+* [ENHANCEMENT] UI: Prefer `rate` over `rad`, `delta` over `deg`, and `count` over `cos` in autocomplete. #9688
+* [ENHANCEMENT] Linode SD: Tune API request page sizes. #9779
+* [BUGFIX] TSDB: Add more size checks when writing individual sections in the index. #9710
+* [BUGFIX] PromQL: Make `deriv()` return zero values for constant series. #9728
+* [BUGFIX] TSDB: Fix panic when checkpoint directory is empty. #9687
+* [BUGFIX] TSDB: Fix panic, out of order chunks, and race warning during WAL replay. #9856
+* [BUGFIX] UI: Correctly render links for targets with IPv6 addresses that contain a Zone ID. #9853
+* [BUGFIX] Promtool: Fix checking of `authorization.credentials_file` and `bearer_token_file` fields. #9883
+* [BUGFIX] Uyuni SD: Fix null pointer exception during initialization. #9924 #9950
+* [BUGFIX] TSDB: Fix queries after a failed snapshot replay. #9980
+
+## 2.31.2 / 2021-12-09
+
+* [BUGFIX] TSDB: Fix queries after a failed snapshot replay. #9980
+
+## 2.31.1 / 2021-11-05
+
+* [BUGFIX] SD: Fix a panic when the experimental discovery manager receives
+  targets during a reload. #9656
+
+## 2.31.0 / 2021-11-02
+
+* [CHANGE] UI: Remove standard PromQL editor in favour of the codemirror-based editor. #9452
+* [FEATURE] PromQL: Add trigonometric functions and `atan2` binary operator. #9239 #9248 #9515
+* [FEATURE] Remote: Add support for exemplar in the remote write receiver endpoint. #9319 #9414
+* [FEATURE] SD: Add PuppetDB service discovery. #8883
+* [FEATURE] SD: Add Uyuni service discovery. #8190
+* [FEATURE] Web: Add support for security-related HTTP headers. #9546
+* [ENHANCEMENT] Azure SD: Add `proxy_url`, `follow_redirects`, `tls_config`. #9267
+* [ENHANCEMENT] Backfill: Add `--max-block-duration` in `promtool create-blocks-from rules`. #9511
+* [ENHANCEMENT] Config: Print human-readable sizes with unit instead of raw numbers. #9361
+* [ENHANCEMENT] HTTP: Re-enable HTTP/2. #9398
+* [ENHANCEMENT] Kubernetes SD: Warn user if number of endpoints exceeds limit. #9467
+* [ENHANCEMENT] OAuth2: Add TLS configuration to token requests. #9550
+* [ENHANCEMENT] PromQL: Several optimizations. #9365 #9360 #9362 #9552
+* [ENHANCEMENT] PromQL: Make aggregations deterministic in instant queries. #9459
+* [ENHANCEMENT] Rules: Add the ability to limit number of alerts or series. #9260 #9541
+* [ENHANCEMENT] SD: Experimental discovery manager to avoid restarts upon reload. Disabled by default, enable with flag `--enable-feature=new-service-discovery-manager`. #9349 #9537
+* [ENHANCEMENT] UI: Debounce timerange setting changes. #9359
+* [BUGFIX] Backfill: Apply rule labels after query labels. #9421
+* [BUGFIX] Scrape: Resolve conflicts between multiple exported label prefixes. #9479 #9518
+* [BUGFIX] Scrape: Restart scrape loops when `__scrape_interval__` is changed. #9551
+* [BUGFIX] TSDB: Fix memory leak in samples deletion. #9151
+* [BUGFIX] UI: Use consistent margin-bottom for all alert kinds. #9318
+
+## 2.30.4 / 2021-12-09
+
+* [BUGFIX] TSDB: Fix queries after a failed snapshot replay. #9980
+
+## 2.30.3 / 2021-10-05
+
+* [BUGFIX] TSDB: Fix panic on failed snapshot replay. #9438
+* [BUGFIX] TSDB: Don't fail snapshot replay with exemplar storage disabled when the snapshot contains exemplars. #9438
+
+## 2.30.2 / 2021-10-01
+
+* [BUGFIX] TSDB: Don't error on overlapping m-mapped chunks during WAL replay. #9381
+
+## 2.30.1 / 2021-09-28
+
+* [ENHANCEMENT] Remote Write: Redact remote write URL when used for metric label. #9383
+* [ENHANCEMENT] UI: Redact remote write URL and proxy URL passwords in the `/config` page. #9408
+* [BUGFIX] promtool rules backfill: Prevent creation of data before the start time. #9339
+* [BUGFIX] promtool rules backfill: Do not query after the end time. #9340
+* [BUGFIX] Azure SD: Fix panic when no computername is set. #9387
+
+## 2.30.0 / 2021-09-14
+
+* [FEATURE] **experimental** TSDB: Snapshot in-memory chunks on shutdown for faster restarts. Behind `--enable-feature=memory-snapshot-on-shutdown` flag. #7229
+* [FEATURE] **experimental** Scrape: Configure scrape interval and scrape timeout via relabeling using `__scrape_interval__` and `__scrape_timeout__` labels respectively. #8911
+* [FEATURE] Scrape: Add `scrape_timeout_seconds` and `scrape_sample_limit` metric. Behind `--enable-feature=extra-scrape-metrics` flag to avoid additional cardinality by default. #9247 #9295
+* [ENHANCEMENT] Scrape: Add `--scrape.timestamp-tolerance` flag to adjust scrape timestamp tolerance when enabled via `--scrape.adjust-timestamps`. #9283
+* [ENHANCEMENT] Remote Write: Improve throughput when sending exemplars. #8921
+* [ENHANCEMENT] TSDB: Optimise WAL loading by removing extra map and caching min-time #9160
+* [ENHANCEMENT] promtool: Speed up checking for duplicate rules. #9262/#9306
+* [ENHANCEMENT] Scrape: Reduce allocations when parsing the metrics. #9299
+* [ENHANCEMENT] docker_sd: Support host network mode #9125
+* [BUGFIX] Exemplars: Fix panic when resizing exemplar storage from 0 to a non-zero size. #9286
+* [BUGFIX] TSDB: Correctly decrement `prometheus_tsdb_head_active_appenders` when the append has no samples. #9230
+* [BUGFIX] promtool rules backfill: Return 1 if backfill was unsuccessful. #9303
+* [BUGFIX] promtool rules backfill: Avoid creation of overlapping blocks. #9324
+* [BUGFIX] config: Fix a panic when reloading configuration with a `null` relabel action. #9224
+
+## 2.29.2 / 2021-08-27
+
+* [BUGFIX] Fix Kubernetes SD failing to discover Ingress in Kubernetes v1.22. #9205
+* [BUGFIX] Fix data race in loading write-ahead-log (WAL). #9259
+
+## 2.29.1 / 2021-08-11
+
+* [BUGFIX] tsdb: align atomically accessed int64 to prevent panic in 32-bit
+  archs. #9192
+
+## 2.29.0 / 2021-08-11
+
+Note for macOS users: Due to [changes in the upcoming Go 1.17](https://tip.golang.org/doc/go1.17#darwin),
+this is the last Prometheus release that supports macOS 10.12 Sierra.
+
+* [CHANGE] Promote `--storage.tsdb.allow-overlapping-blocks` flag to stable. #9117
+* [CHANGE] Promote `--storage.tsdb.retention.size` flag to stable. #9004
+* [FEATURE] Add Kuma service discovery. #8844
+* [FEATURE] Add `present_over_time` PromQL function. #9097
+* [FEATURE] Allow configuring exemplar storage via file and make it reloadable. #8974
+* [FEATURE] UI: Allow selecting time range with mouse drag. #8977
+* [FEATURE] promtool: Add feature flags flag `--enable-feature`. #8958
+* [FEATURE] promtool: Add file_sd file validation. #8950
+* [ENHANCEMENT] Reduce blocking of outgoing remote write requests from series garbage collection. #9109
+* [ENHANCEMENT] Improve write-ahead-log decoding performance. #9106
+* [ENHANCEMENT] Improve append performance in TSDB by reducing mutexes usage. #9061
+* [ENHANCEMENT] Allow configuring `max_samples_per_send` for remote write metadata. #8959
+* [ENHANCEMENT] Add `__meta_gce_interface_ipv4_<name>` meta label to GCE discovery. #8978
+* [ENHANCEMENT] Add `__meta_ec2_availability_zone_id` meta label to EC2 discovery. #8896
+* [ENHANCEMENT] Add `__meta_azure_machine_computer_name` meta label to Azure discovery. #9112
+* [ENHANCEMENT] Add `__meta_hetzner_hcloud_labelpresent_<labelname>` meta label to Hetzner discovery. #9028
+* [ENHANCEMENT] promtool: Add compaction efficiency to `promtool tsdb analyze` reports. #8940
+* [ENHANCEMENT] promtool: Allow configuring max block duration for backfilling via `--max-block-duration` flag. #8919
+* [ENHANCEMENT] UI: Add sorting and filtering to flags page. #8988
+* [ENHANCEMENT] UI: Improve alerts page rendering performance. #9005
+* [BUGFIX] Log when total symbol size exceeds 2^32 bytes, causing compaction to fail, and skip compaction. #9104
+* [BUGFIX] Fix incorrect `target_limit` reloading of zero value. #9120
+* [BUGFIX] Fix head GC and pending readers race condition. #9081
+* [BUGFIX] Fix timestamp handling in OpenMetrics parser. #9008
+* [BUGFIX] Fix potential duplicate metrics in `/federate` endpoint when specifying multiple matchers. #8885
+* [BUGFIX] Fix server configuration and validation for authentication via client cert. #9123
+* [BUGFIX] Allow `start` and `end` again as label names in PromQL queries. They were disallowed since the introduction of @ timestamp feature. #9119
+
+## 2.28.1 / 2021-07-01
+
+* [BUGFIX]: HTTP SD: Allow `charset` specification in `Content-Type` header. #8981
+* [BUGFIX]: HTTP SD: Fix handling of disappeared target groups. #9019
+* [BUGFIX]: Fix incorrect log-level handling after moving to go-kit/log. #9021
+
+## 2.28.0 / 2021-06-21
+
+* [CHANGE] UI: Make the new experimental PromQL editor the default. #8925
+* [FEATURE] Linode SD: Add Linode service discovery. #8846
+* [FEATURE] HTTP SD: Add generic HTTP-based service discovery. #8839
+* [FEATURE] Kubernetes SD: Allow configuring API Server access via a kubeconfig file. #8811
+* [FEATURE] UI: Add exemplar display support to the graphing interface. #8832 #8945 #8929
+* [FEATURE] Consul SD: Add namespace support for Consul Enterprise. #8900
+* [ENHANCEMENT] Promtool: Allow silencing output when importing / backfilling data. #8917
+* [ENHANCEMENT] Consul SD: Support reading tokens from file. #8926
+* [ENHANCEMENT] Rules: Add a new `.ExternalURL` alert field templating variable, containing the external URL of the Prometheus server. #8878
+* [ENHANCEMENT] Scrape: Add experimental `body_size_limit` scrape configuration setting to limit the allowed response body size for target scrapes. #8833 #8886
+* [ENHANCEMENT] Kubernetes SD: Add ingress class name label for ingress discovery. #8916
+* [ENHANCEMENT] UI: Show a startup screen with progress bar when the TSDB is not ready yet. #8662 #8908 #8909 #8946
+* [ENHANCEMENT] SD: Add a target creation failure counter `prometheus_target_sync_failed_total` and improve target creation failure handling. #8786
+* [ENHANCEMENT] TSDB: Improve validation of exemplar label set length. #8816
+* [ENHANCEMENT] TSDB: Add a `prometheus_tsdb_clean_start` metric that indicates whether a TSDB lockfile from a previous run still existed upon startup. #8824
+* [BUGFIX] UI: In the experimental PromQL editor, fix autocompletion and parsing for special float values and improve series metadata fetching. #8856
+* [BUGFIX] TSDB: When merging chunks, split resulting chunks if they would contain more than the maximum of 120 samples. #8582
+* [BUGFIX] SD: Fix the computation of the `prometheus_sd_discovered_targets` metric when using multiple service discoveries. #8828
+
+## 2.27.1 / 2021-05-18
+
+This release contains a bug fix for a security issue in the API endpoint. An
+attacker can craft a special URL that redirects a user to any endpoint via an
+HTTP 302 response. See the [security advisory][GHSA-vx57-7f4q-fpc7] for more details.
+
+[GHSA-vx57-7f4q-fpc7]:https://github.com/prometheus/prometheus/security/advisories/GHSA-vx57-7f4q-fpc7
+
+This vulnerability has been reported by Aaron Devaney from MDSec.
+
+* [BUGFIX] SECURITY: Fix arbitrary redirects under the /new endpoint (CVE-2021-29622)
+
+## 2.27.0 / 2021-05-12
+
+* [CHANGE] Remote write: Metric `prometheus_remote_storage_samples_bytes_total` renamed to `prometheus_remote_storage_bytes_total`. #8296
+* [FEATURE] Promtool: Retroactive rule evaluation functionality. #7675
+* [FEATURE] Configuration: Environment variable expansion for external labels. Behind `--enable-feature=expand-external-labels` flag. #8649
+* [FEATURE] TSDB: Add a flag(`--storage.tsdb.max-block-chunk-segment-size`) to control the max chunks file size of the blocks for small Prometheus instances. #8478
+* [FEATURE] UI: Add a dark theme. #8604
+* [FEATURE] AWS Lightsail Discovery: Add AWS Lightsail Discovery. #8693
+* [FEATURE] Docker Discovery: Add Docker Service Discovery. #8629
+* [FEATURE] OAuth: Allow OAuth 2.0 to be used anywhere an HTTP client is used. #8761
+* [FEATURE] Remote Write: Send exemplars via remote write. Experimental and disabled by default. #8296
+* [ENHANCEMENT] Digital Ocean Discovery: Add `__meta_digitalocean_vpc` label. #8642
+* [ENHANCEMENT] Scaleway Discovery: Read Scaleway secret from a file. #8643
+* [ENHANCEMENT] Scrape: Add configurable limits for label size and count. #8777
+* [ENHANCEMENT] UI: Add 16w and 26w time range steps. #8656
+* [ENHANCEMENT] Templating: Enable parsing strings in `humanize` functions. #8682
+* [BUGFIX] UI: Provide errors instead of blank page on TSDB Status Page. #8654 #8659
+* [BUGFIX] TSDB: Do not panic when writing very large records to the WAL. #8790
+* [BUGFIX] TSDB: Avoid panic when mmapped memory is referenced after the file is closed. #8723
+* [BUGFIX] Scaleway Discovery: Fix nil pointer dereference. #8737
+* [BUGFIX] Consul Discovery: Restart no longer required after config update with no targets. #8766
+
+## 2.26.0 / 2021-03-31
+
+Prometheus is now built and supporting Go 1.16 (#8544). This reverts the memory release pattern added in Go 1.12. This makes common RSS usage metrics showing more accurate number for actual memory used by Prometheus. You can read more details [here](https://www.bwplotka.dev/2019/golang-memory-monitoring/).
+
+Note that from this release Prometheus is using Alertmanager v2 by default.
+
+* [CHANGE] Alerting: Using Alertmanager v2 API by default. #8626
+* [CHANGE] Prometheus/Promtool: As agreed on dev summit, binaries are now printing help and usage to stdout instead of stderr. #8542
+* [FEATURE] Remote: Add support for AWS SigV4 auth method for remote_write. #8509
+* [FEATURE] Scaleway Discovery: Add Scaleway Service Discovery. #8555
+* [FEATURE] PromQL: Allow negative offsets. Behind `--enable-feature=promql-negative-offset` flag. #8487
+* [FEATURE] **experimental** Exemplars: Add in-memory storage for exemplars. Behind `--enable-feature=exemplar-storage` flag. #6635
+* [FEATURE] UI: Add advanced auto-completion, syntax highlighting and linting to graph page query input. #8634
+* [ENHANCEMENT] Digital Ocean Discovery: Add `__meta_digitalocean_image` label. #8497
+* [ENHANCEMENT] PromQL: Add `last_over_time`, `sgn`, `clamp` functions. #8457
+* [ENHANCEMENT] Scrape: Add support for specifying type of Authorization header credentials with Bearer by default. #8512
+* [ENHANCEMENT] Scrape: Add `follow_redirects` option to scrape configuration. #8546
+* [ENHANCEMENT] Remote: Allow retries on HTTP 429 response code for remote_write. Disabled by default. See [configuration docs](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#remote_write) for details. #8237 #8477
+* [ENHANCEMENT] Remote: Allow configuring custom headers for remote_read. See [configuration docs](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#remote_read) for details. #8516
+* [ENHANCEMENT] UI: Hitting Enter now triggers new query. #8581
+* [ENHANCEMENT] UI: Better handling of long rule and names on the `/rules` and `/targets` pages. #8608 #8609
+* [ENHANCEMENT] UI: Add collapse/expand all button on the `/targets` page. #8486
+* [BUGFIX] TSDB: Eager deletion of removable blocks on every compaction, saving disk peak space usage. #8007
+* [BUGFIX] PromQL: Fix parser support for special characters like`炬`. #8517
+* [BUGFIX] Rules: Update rule health for append/commit fails. #8619
+
+## 2.25.2 / 2021-03-16
+
+* [BUGFIX] Fix the ingestion of scrapes when the wall clock changes, e.g. on suspend. #8601
+
+## 2.25.1 / 2021-03-14
+
+* [BUGFIX] Fix a crash in `promtool` when a subquery with default resolution is used. #8569
+* [BUGFIX] Fix a bug that could return duplicate datapoints in queries. #8591
+* [BUGFIX] Fix crashes with arm64 when compiled with go1.16. #8593
+
+## 2.25.0 / 2021-02-17
+
+This release includes a new `--enable-feature=` flag that enables
+experimental features. Such features might be changed or removed in the future.
+
+In the next minor release (2.26), Prometheus will use the Alertmanager API v2.
+It will be done by defaulting `alertmanager_config.api_version` to `v2`.
+Alertmanager API v2 was released in Alertmanager v0.16.0 (released in January
+2019).
+
+* [FEATURE] **experimental** API: Accept remote_write requests. Behind the --enable-feature=remote-write-receiver flag. #8424
+* [FEATURE] **experimental** PromQL: Add `@ <timestamp>` modifier. Behind the --enable-feature=promql-at-modifier flag. #8121 #8436 #8425
+* [ENHANCEMENT] Add optional name property to testgroup for better test failure output. #8440
+* [ENHANCEMENT] Add warnings into React Panel on the Graph page. #8427
+* [ENHANCEMENT] TSDB: Increase the number of buckets for the compaction duration metric. #8342
+* [ENHANCEMENT] Remote: Allow passing along custom remote_write HTTP headers. #8416
+* [ENHANCEMENT] Mixins: Scope grafana configuration. #8332
+* [ENHANCEMENT] Kubernetes SD: Add endpoint labels metadata. #8273
+* [ENHANCEMENT] UI: Expose total number of label pairs in head in TSDB stats page. #8343
+* [ENHANCEMENT] TSDB: Reload blocks every minute, to detect new blocks and enforce retention more often. #8340
+* [BUGFIX] API: Fix global URL when external address has no port. #8359
+* [BUGFIX] Backfill: Fix error message handling. #8432
+* [BUGFIX] Backfill: Fix "add sample: out of bounds" error when series span an entire block. #8476
+* [BUGFIX] Deprecate unused flag --alertmanager.timeout. #8407
+* [BUGFIX] Mixins: Support remote-write metrics renamed in v2.23 in alerts. #8423
+* [BUGFIX] Remote: Fix garbage collection of dropped series in remote write. #8387
+* [BUGFIX] Remote: Log recoverable remote write errors as warnings. #8412
+* [BUGFIX] TSDB: Remove pre-2.21 temporary blocks on start. #8353.
+* [BUGFIX] UI: Fix duplicated keys on /targets page. #8456
+* [BUGFIX] UI: Fix label name leak into class name. #8459
+
+## 2.24.1 / 2021-01-20
+
+* [ENHANCEMENT] Cache basic authentication results to significantly improve performance of HTTP endpoints (via an update of prometheus/exporter-toolkit).
+* [BUGFIX] Prevent user enumeration by timing requests sent to authenticated HTTP endpoints (via an update of prometheus/exporter-toolkit).
+
+## 2.24.0 / 2021-01-06
+
+* [FEATURE] Add TLS and basic authentication to HTTP endpoints. #8316
+* [FEATURE] promtool: Add `check web-config` subcommand to check web config files. #8319
+* [FEATURE] promtool: Add `tsdb create-blocks-from openmetrics` subcommand to backfill metrics data from an OpenMetrics file. #8084
+* [ENHANCEMENT] HTTP API: Fast-fail queries with only empty matchers. #8288
+* [ENHANCEMENT] HTTP API: Support matchers for labels API. #8301
+* [ENHANCEMENT] promtool: Improve checking of URLs passed on the command line. #7956
+* [ENHANCEMENT] SD: Expose IPv6 as a label in EC2 SD. #7086
+* [ENHANCEMENT] SD: Reuse EC2 client, reducing frequency of requesting credentials. #8311
+* [ENHANCEMENT] TSDB: Add logging when compaction takes more than the block time range. #8151
+* [ENHANCEMENT] TSDB: Avoid unnecessary GC runs after compaction. #8276
+* [BUGFIX] HTTP API: Avoid double-closing of channel when quitting multiple times via HTTP. #8242
+* [BUGFIX] SD: Ignore CNAME records in DNS SD to avoid spurious `Invalid SRV record` warnings. #8216
+* [BUGFIX] SD: Avoid config error triggered by valid label selectors in Kubernetes SD. #8285
+
+## 2.23.0 / 2020-11-26
+
+* [CHANGE] UI: Make the React UI default. #8142
+* [CHANGE] Remote write: The following metrics were removed/renamed in remote write. #6815
+  * `prometheus_remote_storage_succeeded_samples_total` was removed and `prometheus_remote_storage_samples_total` was introduced for all the samples attempted to send.
+  * `prometheus_remote_storage_sent_bytes_total` was removed and replaced with `prometheus_remote_storage_samples_bytes_total` and `prometheus_remote_storage_metadata_bytes_total`.
+  * `prometheus_remote_storage_failed_samples_total` -> `prometheus_remote_storage_samples_failed_total` .
+  * `prometheus_remote_storage_retried_samples_total` -> `prometheus_remote_storage_samples_retried_total`.
+  * `prometheus_remote_storage_dropped_samples_total` -> `prometheus_remote_storage_samples_dropped_total`.
+  * `prometheus_remote_storage_pending_samples` -> `prometheus_remote_storage_samples_pending`.
+* [CHANGE] Remote: Do not collect non-initialized timestamp metrics. #8060
+* [FEATURE] [EXPERIMENTAL] Remote write: Allow metric metadata to be propagated via remote write. The following new metrics were introduced: `prometheus_remote_storage_metadata_total`, `prometheus_remote_storage_metadata_failed_total`, `prometheus_remote_storage_metadata_retried_total`, `prometheus_remote_storage_metadata_bytes_total`. #6815
+* [ENHANCEMENT] Remote write: Added a metric `prometheus_remote_storage_max_samples_per_send` for remote write. #8102
+* [ENHANCEMENT] TSDB: Make the snapshot directory name always the same length. #8138
+* [ENHANCEMENT] TSDB: Create a checkpoint only once at the end of all head compactions. #8067
+* [ENHANCEMENT] TSDB: Avoid Series API from hitting the chunks. #8050
+* [ENHANCEMENT] TSDB: Cache label name and last value when adding series during compactions making compactions faster. #8192
+* [ENHANCEMENT] PromQL: Improved performance of Hash method making queries a bit faster. #8025
+* [ENHANCEMENT] promtool: `tsdb list` now prints block sizes. #7993
+* [ENHANCEMENT] promtool: Calculate mint and maxt per test avoiding unnecessary calculations. #8096
+* [ENHANCEMENT] SD: Add filtering of services to Docker Swarm SD. #8074
+* [BUGFIX] React UI: Fix button display when there are no panels. #8155
+* [BUGFIX] PromQL: Fix timestamp() method for vector selector inside parenthesis. #8164
+* [BUGFIX] PromQL: Don't include rendered expression on PromQL parse errors. #8177
+* [BUGFIX] web: Fix panic with double close() of channel on calling `/-/quit/`. #8166
+* [BUGFIX] TSDB: Fixed WAL corruption on partial writes within a page causing `invalid checksum` error on WAL replay. #8125
+* [BUGFIX] Update config metrics `prometheus_config_last_reload_successful` and `prometheus_config_last_reload_success_timestamp_seconds` right after initial validation before starting TSDB.
+* [BUGFIX] promtool: Correctly detect duplicate label names in exposition.
+
+## 2.22.2 / 2020-11-16
+
+* [BUGFIX] Fix race condition in syncing/stopping/reloading scrapers. #8176
+
+## 2.22.1 / 2020-11-03
+
+* [BUGFIX] Fix potential "mmap: invalid argument" errors in loading the head chunks, after an unclean shutdown, by performing read repairs. #8061
+* [BUGFIX] Fix serving metrics and API when reloading scrape config. #8104
+* [BUGFIX] Fix head chunk size calculation for size based retention. #8139
+
+## 2.22.0 / 2020-10-07
+
+As announced in the 2.21.0 release notes, the experimental gRPC API v2 has been
+removed.
+
+* [CHANGE] web: Remove APIv2. #7935
+* [ENHANCEMENT] React UI: Implement missing TSDB head stats section. #7876
+* [ENHANCEMENT] UI: Add Collapse all button to targets page. #6957
+* [ENHANCEMENT] UI: Clarify alert state toggle via checkbox icon. #7936
+* [ENHANCEMENT] Add `rule_group_last_evaluation_samples` and `prometheus_tsdb_data_replay_duration_seconds` metrics. #7737 #7977
+* [ENHANCEMENT] Gracefully handle unknown WAL record types. #8004
+* [ENHANCEMENT] Issue a warning for 64 bit systems running 32 bit binaries. #8012
+* [BUGFIX] Adjust scrape timestamps to align them to the intended schedule, effectively reducing block size. Workaround for a regression in go1.14+. #7976
+* [BUGFIX] promtool: Ensure alert rules are marked as restored in unit tests. #7661
+* [BUGFIX] Eureka: Fix service discovery when compiled in 32-bit. #7964
+* [BUGFIX] Don't do literal regex matching optimisation when case insensitive. #8013
+* [BUGFIX] Fix classic UI sometimes running queries for instant query when in range query mode. #7984
+
+## 2.21.0 / 2020-09-11
+
+This release is built with Go 1.15, which deprecates [X.509 CommonName](https://golang.org/doc/go1.15#commonname)
+in TLS certificates validation.
+
+In the unlikely case that you use the gRPC API v2 (which is limited to TSDB
+admin commands), please note that we will remove this experimental API in the
+next minor release 2.22.
+
+* [CHANGE] Disable HTTP/2 because of concerns with the Go HTTP/2 client. #7588 #7701
+* [CHANGE] PromQL: `query_log_file` path is now relative to the config file. #7701
+* [CHANGE] Promtool: Replace the tsdb command line tool by a promtool tsdb subcommand. #6088
+* [CHANGE] Rules: Label `rule_group_iterations` metric with group name. #7823
+* [FEATURE] Eureka SD: New service discovery. #3369
+* [FEATURE] Hetzner SD: New service discovery. #7822
+* [FEATURE] Kubernetes SD: Support Kubernetes EndpointSlices. #6838
+* [FEATURE] Scrape: Add per scrape-config targets limit. #7554
+* [ENHANCEMENT] Support composite durations in PromQL, config and UI, e.g. 1h30m. #7713 #7833
+* [ENHANCEMENT] DNS SD: Add SRV record target and port meta labels. #7678
+* [ENHANCEMENT] Docker Swarm SD: Support tasks and service without published ports. #7686
+* [ENHANCEMENT] PromQL: Reduce the amount of data queried by remote read when a subquery has an offset. #7667
+* [ENHANCEMENT] Promtool: Add `--time` option to query instant command. #7829
+* [ENHANCEMENT] UI: Respect the `--web.page-title` parameter in the React UI. #7607
+* [ENHANCEMENT] UI: Add duration, labels, annotations to alerts page in the React UI. #7605
+* [ENHANCEMENT] UI: Add duration on the React UI rules page, hide annotation and labels if empty. #7606
+* [BUGFIX] API: Deduplicate series in /api/v1/series. #7862
+* [BUGFIX] PromQL: Drop metric name in bool comparison between two instant vectors. #7819
+* [BUGFIX] PromQL: Exit with an error when time parameters can't be parsed. #7505
+* [BUGFIX] Remote read: Re-add accidentally removed tracing for remote-read requests. #7916
+* [BUGFIX] Rules: Detect extra fields in rule files. #7767
+* [BUGFIX] Rules: Disallow overwriting the metric name in the `labels` section of recording rules. #7787
+* [BUGFIX] Rules: Keep evaluation timestamp across reloads. #7775
+* [BUGFIX] Scrape: Do not stop scrapes in progress during reload. #7752
+* [BUGFIX] TSDB: Fix `chunks.HeadReadWriter: maxt of the files are not set` error. #7856
+* [BUGFIX] TSDB: Delete blocks atomically to prevent corruption when there is a panic/crash during deletion. #7772
+* [BUGFIX] Triton SD: Fix a panic when triton_sd_config is nil. #7671
+* [BUGFIX] UI: Fix react UI bug with series going on and off. #7804
+* [BUGFIX] UI: Fix styling bug for target labels with special names in React UI. #7902
+* [BUGFIX] Web: Stop CMUX and GRPC servers even with stale connections, preventing the server to stop on SIGTERM. #7810
+
+## 2.20.1 / 2020-08-05
+
+* [BUGFIX] SD: Reduce the Consul watch timeout to 2m and adjust the request timeout accordingly. #7724
+
+## 2.20.0 / 2020-07-22
+
+This release changes WAL compression from opt-in to default. WAL compression will prevent a downgrade to v2.10 or earlier without deleting the WAL. Disable WAL compression explicitly by setting the command line flag `--no-storage.tsdb.wal-compression` if you require downgrading to v2.10 or earlier.
+
+* [CHANGE] promtool: Changed rule numbering from 0-based to 1-based when reporting rule errors. #7495
+* [CHANGE] Remote read: Added `prometheus_remote_storage_read_queries_total` counter and `prometheus_remote_storage_read_request_duration_seconds` histogram, removed `prometheus_remote_storage_remote_read_queries_total` counter.
+* [CHANGE] Remote write: Added buckets for longer durations to `prometheus_remote_storage_sent_batch_duration_seconds` histogram.
+* [CHANGE] TSDB: WAL compression is enabled by default. #7410
+* [FEATURE] PromQL: Added `group()` aggregator. #7480
+* [FEATURE] SD: Added Docker Swarm SD. #7420
+* [FEATURE] SD: Added DigitalOcean SD. #7407
+* [FEATURE] SD: Added Openstack config option to query alternative endpoints. #7494
+* [ENHANCEMENT] Configuration: Exit early on invalid config file and signal it with exit code 2. #7399
+* [ENHANCEMENT] PromQL: `without` is now a valid metric identifier. #7533
+* [ENHANCEMENT] PromQL: Optimized regex label matching for literals within the pattern or as prefix/suffix. #7453 #7503
+* [ENHANCEMENT] promtool: Added time range parameters for labels API in promtool. #7463
+* [ENHANCEMENT] Remote write: Include samples waiting in channel in pending samples metric. Log number of dropped samples on hard shutdown. #7335
+* [ENHANCEMENT] Scrape: Ingest synthetic scrape report metrics atomically with the corresponding scraped metrics. #7562
+* [ENHANCEMENT] SD: Reduce timeouts for Openstack SD. #7507
+* [ENHANCEMENT] SD: Use 10m timeout for Consul watches. #7423
+* [ENHANCEMENT] SD: Added AMI meta label for EC2 SD. #7386
+* [ENHANCEMENT] TSDB: Increment WAL corruption metric also on WAL corruption during checkpointing. #7491
+* [ENHANCEMENT] TSDB: Improved query performance for high-cardinality labels. #7448
+* [ENHANCEMENT] UI: Display dates as well as timestamps in status page. #7544
+* [ENHANCEMENT] UI: Improved scrolling when following hash-fragment links. #7456
+* [ENHANCEMENT] UI: React UI renders numbers in alerts in a more human-readable way. #7426
+* [BUGFIX] API: Fixed error status code in the query API. #7435
+* [BUGFIX] PromQL: Fixed `avg` and `avg_over_time` for NaN, Inf, and float64 overflows. #7346
+* [BUGFIX] PromQL: Fixed off-by-one error in `histogram_quantile`. #7393
+* [BUGFIX] promtool: Support extended durations in rules unit tests. #6297
+* [BUGFIX] Scrape: Fix undercounting for `scrape_samples_post_metric_relabeling` in case of errors. #7342
+* [BUGFIX] TSDB: Don't panic on WAL corruptions. #7550
+* [BUGFIX] TSDB: Avoid leaving behind empty files in `chunks_head`, causing startup failures. #7573
+* [BUGFIX] TSDB: Fixed race between compact (gc, populate) and head append causing unknown symbol error. #7560
+* [BUGFIX] TSDB: Fixed unknown symbol error during head compaction. #7526
+* [BUGFIX] TSDB: Fixed panic during TSDB metric registration. #7501
+* [BUGFIX] TSDB: Fixed `--limit` command line flag in `tsdb` tool. #7430
+
+## 2.19.3 / 2020-07-24
+
+* [BUGFIX] TSDB: Don't panic on WAL corruptions. #7550
+* [BUGFIX] TSDB: Avoid leaving behind empty files in chunks_head, causing startup failures. #7573
+
+## 2.19.2 / 2020-06-26
+
+* [BUGFIX] Remote Write: Fix panic when reloading config with modified queue parameters. #7452
+
+## 2.19.1 / 2020-06-18
+
+* [BUGFIX] TSDB: Fix m-map file truncation leading to unsequential files. #7414
+
+## 2.19.0 / 2020-06-09
+
+* [FEATURE] TSDB: Memory-map full chunks of Head (in-memory) block from disk. This reduces memory footprint and makes restarts faster. #6679
+* [ENHANCEMENT] Discovery: Added discovery support for Triton global zones. #7250
+* [ENHANCEMENT] Increased alert resend delay to be more tolerant towards failures. #7228
+* [ENHANCEMENT] Remote Read: Added `prometheus_remote_storage_remote_read_queries_total` counter to count total number of remote read queries. #7328
+* [ENHANCEMEMT] Added time range parameters for label names and label values API. #7288
+* [ENHANCEMENT] TSDB: Reduced contention in isolation for high load. #7332
+* [BUGFIX] PromQL: Eliminated collision while checking for duplicate labels. #7058
+* [BUGFIX] React UI: Don't null out data when clicking on the current tab. #7243
+* [BUGFIX] PromQL: Correctly track number of samples for a query. #7307
+* [BUGFIX] PromQL: Return NaN when histogram buckets have 0 observations. #7318
+
+## 2.18.2 / 2020-06-09
+
+* [BUGFIX] TSDB: Fix incorrect query results when using Prometheus with remote reads configured #7361
+
+## 2.18.1 / 2020-05-07
+
+* [BUGFIX] TSDB: Fixed snapshot API. #7217
+
+## 2.18.0 / 2020-05-05
+
+* [CHANGE] Federation: Only use local TSDB for federation (ignore remote read). #7096
+* [CHANGE] Rules: `rule_evaluations_total` and `rule_evaluation_failures_total` have a `rule_group` label now. #7094
+* [FEATURE] Tracing: Added experimental Jaeger support #7148
+* [ENHANCEMENT] TSDB: Significantly reduce WAL size kept around after a block cut. #7098
+* [ENHANCEMENT] Discovery: Add `architecture` meta label for EC2. #7000
+* [BUGFIX] UI: Fixed wrong MinTime reported by /status. #7182
+* [BUGFIX] React UI: Fixed multiselect legend on OSX. #6880
+* [BUGFIX] Remote Write: Fixed blocked resharding edge case. #7122
+* [BUGFIX] Remote Write: Fixed remote write not updating on relabel configs change. #7073
+
+## 2.17.2 / 2020-04-20
+
+* [BUGFIX] Federation: Register federation metrics #7081
+* [BUGFIX] PromQL: Fix panic in parser error handling #7132
+* [BUGFIX] Rules: Fix reloads hanging when deleting a rule group that is being evaluated #7138
+* [BUGFIX] TSDB: Fix a memory leak when prometheus starts with an empty TSDB WAL #7135
+* [BUGFIX] TSDB: Make isolation more robust to panics in web handlers #7129 #7136
+
+## 2.17.1 / 2020-03-26
+
+* [BUGFIX] TSDB: Fix query performance regression that increased memory and CPU usage #7051
+
+## 2.17.0 / 2020-03-24
+
+This release implements isolation in TSDB. API queries and recording rules are
+guaranteed to only see full scrapes and full recording rules. This comes with a
+certain overhead in resource usage. Depending on the situation, there might be
+some increase in memory usage, CPU usage, or query latency.
+
+* [FEATURE] TSDB: Support isolation #6841
+* [ENHANCEMENT] PromQL: Allow more keywords as metric names #6933
+* [ENHANCEMENT] React UI: Add normalization of localhost URLs in targets page #6794
+* [ENHANCEMENT] Remote read: Read from remote storage concurrently #6770
+* [ENHANCEMENT] Rules: Mark deleted rule series as stale after a reload #6745
+* [ENHANCEMENT] Scrape: Log scrape append failures as debug rather than warn #6852
+* [ENHANCEMENT] TSDB: Improve query performance for queries that partially hit the head #6676
+* [ENHANCEMENT] Consul SD: Expose service health as meta label #5313
+* [ENHANCEMENT] EC2 SD: Expose EC2 instance lifecycle as meta label #6914
+* [ENHANCEMENT] Kubernetes SD: Expose service type as meta label for K8s service role #6684
+* [ENHANCEMENT] Kubernetes SD: Expose label_selector and field_selector #6807
+* [ENHANCEMENT] Openstack SD: Expose hypervisor id as meta label #6962
+* [BUGFIX] PromQL: Do not escape HTML-like chars in query log #6834 #6795
+* [BUGFIX] React UI: Fix data table matrix values #6896
+* [BUGFIX] React UI: Fix new targets page not loading when using non-ASCII characters #6892
+* [BUGFIX] Remote read: Fix duplication of metrics read from remote storage with external labels #6967 #7018
+* [BUGFIX] Remote write: Register WAL watcher and live reader metrics for all remotes, not just the first one #6998
+* [BUGFIX] Scrape: Prevent removal of metric names upon relabeling #6891
+* [BUGFIX] Scrape: Fix 'superfluous response.WriteHeader call' errors when scrape fails under some circonstances #6986
+* [BUGFIX] Scrape: Fix crash when reloads are separated by two scrape intervals #7011
+
 ## 2.16.0 / 2020-02-13
 
 * [FEATURE] React UI: Support local timezone on /graph #6692
@@ -373,10 +2263,10 @@ We're rolling back the Dockerfile changes introduced in 2.6.0. If you made chang
 
 ## 2.4.2 / 2018-09-21
 
- The last release didn't have bugfix included due to a vendoring error.
+The last release didn't have bugfix included due to a vendoring error.
 
- * [BUGFIX] Handle WAL corruptions properly prometheus/tsdb#389
- * [BUGFIX] Handle WAL migrations correctly on Windows prometheus/tsdb#392
+* [BUGFIX] Handle WAL corruptions properly prometheus/tsdb#389
+* [BUGFIX] Handle WAL migrations correctly on Windows prometheus/tsdb#392
 
 ## 2.4.1 / 2018-09-19
 
@@ -523,15 +2413,14 @@ This release includes multiple bugfixes and features. Further, the WAL implement
 * [BUGFIX] tsdb: Cleanup and do not retry failing compactions.
 * [BUGFIX] tsdb: Close WAL while shutting down.
 
-
 ## 2.0.0 / 2017-11-08
 
 This release includes a completely rewritten storage, huge performance
 improvements, but also many backwards incompatible changes. For more
 information, read the announcement blog post and migration guide.
 
-https://prometheus.io/blog/2017/11/08/announcing-prometheus-2-0/
-https://prometheus.io/docs/prometheus/2.0/migration/
+<https://prometheus.io/blog/2017/11/08/announcing-prometheus-2-0/>
+<https://prometheus.io/docs/prometheus/2.0/migration/>
 
 * [CHANGE] Completely rewritten storage layer, with WAL. This is not backwards compatible with 1.x storage, and many flags have changed/disappeared.
 * [CHANGE] New staleness behavior. Series now marked stale after target scrapes no longer return them, and soon after targets disappear from service discovery.
@@ -608,7 +2497,7 @@ https://prometheus.io/docs/prometheus/2.0/migration/
 ## 1.7.0 / 2017-06-06
 
 * [CHANGE] Compress remote storage requests and responses with unframed/raw snappy.
-* [CHANGE] Properly ellide secrets in config.
+* [CHANGE] Properly elide secrets in config.
 * [FEATURE] Add OpenStack service discovery.
 * [FEATURE] Add ability to limit Kubernetes service discovery to certain namespaces.
 * [FEATURE] Add metric for discovered number of Alertmanagers.
@@ -941,7 +2830,7 @@ This release contains multiple breaking changes to the configuration schema.
 This version contains a breaking change to the query language. Please read
 the documentation on the grouping behavior of vector matching:
 
-https://prometheus.io/docs/querying/operators/#vector-matching
+<https://prometheus.io/docs/querying/operators/#vector-matching>
 
 * [FEATURE] Add experimental Microsoft Azure service discovery
 * [FEATURE] Add `ignoring` modifier for binary operations
@@ -1067,7 +2956,7 @@ BREAKING CHANGES:
   with InfluxDB 0.9.x. 0.8.x versions of InfluxDB are not supported anymore.
 * Escape sequences in double- and single-quoted string literals in rules or query
   expressions are now interpreted like escape sequences in Go string literals
-  (https://golang.org/ref/spec#String_literals).
+  (<https://golang.org/ref/spec#String_literals>).
 
 Future breaking changes / deprecated features:
 
@@ -1203,6 +3092,7 @@ All changes:
 * [CLEANUP] Resolve relative paths during configuration loading.
 
 ## 0.15.1 / 2015-07-27
+
 * [BUGFIX] Fix vector matching behavior when there is a mix of equality and
   non-equality matchers in a vector selector and one matcher matches no series.
 * [ENHANCEMENT] Allow overriding `GOARCH` and `GOOS` in Makefile.INCLUDE.
@@ -1320,6 +3210,7 @@ All changes:
 * [CLEANUP] Use new v1 HTTP API for querying and graphing.
 
 ## 0.14.0 / 2015-06-01
+
 * [CHANGE] Configuration format changed and switched to YAML.
   (See the provided [migration tool](https://github.com/prometheus/migrate/releases).)
 * [ENHANCEMENT] Redesign of state-preserving target discovery.
@@ -1345,9 +3236,11 @@ All changes:
 * [ENHANCEMENT] Limit retrievable samples to the storage's retention window.
 
 ## 0.13.4 / 2015-05-23
+
 * [BUGFIX] Fix a race while checkpointing fingerprint mappings.
 
 ## 0.13.3 / 2015-05-11
+
 * [BUGFIX] Handle fingerprint collisions properly.
 * [CHANGE] Comments in rules file must start with `#`. (The undocumented `//`
   and `/*...*/` comment styles are no longer supported.)
@@ -1358,6 +3251,7 @@ All changes:
 * [ENHANCEMENT] Terminate running queries during shutdown.
 
 ## 0.13.2 / 2015-05-05
+
 * [MAINTENANCE] Updated vendored dependencies to their newest versions.
 * [MAINTENANCE] Include rule_checker and console templates in release tarball.
 * [BUGFIX] Sort NaN as the lowest value.
@@ -1368,10 +3262,12 @@ All changes:
 * [BUGFIX] Show correct error on wrong DNS response.
 
 ## 0.13.1 / 2015-04-09
+
 * [BUGFIX] Treat memory series with zero chunks correctly in series maintenance.
 * [ENHANCEMENT] Improve readability of usage text even more.
 
 ## 0.13.0 / 2015-04-08
+
 * [ENHANCEMENT] Double-delta encoding for chunks, saving typically 40% of
   space, both in RAM and on disk.
 * [ENHANCEMENT] Redesign of chunk persistence queuing, increasing performance
@@ -1399,6 +3295,7 @@ All changes:
 * [MAINTENANCE] Updated vendored dependencies to their newest versions.
 
 ## 0.12.0 / 2015-03-04
+
 * [CHANGE] Use client_golang v0.3.1. THIS CHANGES FINGERPRINTING AND INVALIDATES
   ALL PERSISTED FINGERPRINTS. You have to wipe your storage to use this or
   later versions. There is a version guard in place that will prevent you to
@@ -1414,6 +3311,7 @@ All changes:
 * [CHANGE] Makefile uses Go 1.4.2.
 
 ## 0.11.1 / 2015-02-27
+
 * [BUGFIX] Make series maintenance complete again. (Ever since 0.9.0rc4,
   or commit 0851945, series would not be archived, chunk descriptors would
   not be evicted, and stale head chunks would never be closed. This happened
@@ -1426,6 +3324,7 @@ All changes:
 * [ENHANCEMENT] Limit the number of 'dirty' series counted during checkpointing.
 
 ## 0.11.0 / 2015-02-23
+
 * [FEATURE] Introduce new metric type Histogram with server-side aggregation.
 * [FEATURE] Add offset operator.
 * [FEATURE] Add floor, ceil and round functions.
@@ -1450,18 +3349,20 @@ All changes:
 * [CLEANUP] Various code cleanups.
 
 ## 0.10.0 / 2015-01-26
+
 * [CHANGE] More efficient JSON result format in query API. This requires
   up-to-date versions of PromDash and prometheus_cli, too.
 * [ENHANCEMENT] Excluded non-minified Bootstrap assets and the Bootstrap maps
   from embedding into the binary. Those files are only used for debugging,
   and then you can use -web.use-local-assets. By including fewer files, the
   RAM usage during compilation is much more manageable.
-* [ENHANCEMENT] Help link points to https://prometheus.github.io now.
+* [ENHANCEMENT] Help link points to <https://prometheus.github.io> now.
 * [FEATURE] Consoles for haproxy and cloudwatch.
 * [BUGFIX] Several fixes to graphs in consoles.
 * [CLEANUP] Removed a file size check that did not check anything.
 
 ## 0.9.0 / 2015-01-23
+
 * [CHANGE] Reworked command line flags, now more consistent and taking into
   account needs of the new storage backend (see below).
 * [CHANGE] Metric names are dropped after certain transformations.
@@ -1503,10 +3404,12 @@ All changes:
 * [CLEANUP] Removed dead code.
 
 ## 0.8.0 / 2014-09-04
+
 * [ENHANCEMENT] Stagger scrapes to spread out load.
 * [BUGFIX] Correctly quote HTTP Accept header.
 
 ## 0.7.0 / 2014-08-06
+
 * [FEATURE] Added new functions: abs(), topk(), bottomk(), drop_common_labels().
 * [FEATURE] Let console templates get graph links from expressions.
 * [FEATURE] Allow console templates to dynamically include other templates.
@@ -1521,6 +3424,7 @@ All changes:
 * [ENHANCEMENT] Dockerfile also builds Prometheus support tools now.
 
 ## 0.6.0 / 2014-06-30
+
 * [FEATURE] Added console and alert templates support, along with various template functions.
 * [PERFORMANCE] Much faster and more memory-efficient flushing to disk.
 * [ENHANCEMENT] Query results are now only logged when debugging.

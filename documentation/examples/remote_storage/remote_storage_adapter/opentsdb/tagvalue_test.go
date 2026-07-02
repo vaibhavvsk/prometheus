@@ -1,4 +1,4 @@
-// Copyright 2016 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -14,9 +14,10 @@
 package opentsdb
 
 import (
-	"bytes"
 	"encoding/json"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 var stringtests = []struct {
@@ -32,17 +33,9 @@ var stringtests = []struct {
 
 func TestTagValueMarshaling(t *testing.T) {
 	for i, tt := range stringtests {
-		json, err := json.Marshal(tt.tv)
-		if err != nil {
-			t.Errorf("%d. Marshal(%q) returned err: %s", i, tt.tv, err)
-		} else {
-			if !bytes.Equal(json, tt.json) {
-				t.Errorf(
-					"%d. Marshal(%q) => %q, want %q",
-					i, tt.tv, json, tt.json,
-				)
-			}
-		}
+		got, err := json.Marshal(tt.tv)
+		require.NoError(t, err, "%d. Marshal(%q) returned error.", i, tt.tv)
+		require.Equal(t, tt.json, got, "%d. Marshal(%q) not equal.", i, tt.tv)
 	}
 }
 
@@ -50,15 +43,7 @@ func TestTagValueUnMarshaling(t *testing.T) {
 	for i, tt := range stringtests {
 		var tv TagValue
 		err := json.Unmarshal(tt.json, &tv)
-		if err != nil {
-			t.Errorf("%d. Unmarshal(%q, &str) returned err: %s", i, tt.json, err)
-		} else {
-			if tv != tt.tv {
-				t.Errorf(
-					"%d. Unmarshal(%q, &str) => str==%q, want %q",
-					i, tt.json, tv, tt.tv,
-				)
-			}
-		}
+		require.NoError(t, err, "%d. Unmarshal(%q, &str) returned error.", i, tt.json)
+		require.Equal(t, tt.tv, tv, "%d. Unmarshal(%q, &str) not equal.", i, tt.json)
 	}
 }

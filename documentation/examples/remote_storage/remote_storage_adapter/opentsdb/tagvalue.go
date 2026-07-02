@@ -1,4 +1,4 @@
-// Copyright 2016 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -17,7 +17,6 @@ import (
 	"bytes"
 	"fmt"
 
-	"github.com/pkg/errors"
 	"github.com/prometheus/common/model"
 )
 
@@ -52,22 +51,22 @@ type TagValue model.LabelValue
 //
 // Examples:
 //
-// "foo-bar-42" -> "foo-bar-42"
+//	"foo-bar-42" -> "foo-bar-42"
 //
-// "foo_bar_42" -> "foo__bar__42"
+//	"foo_bar_42" -> "foo__bar__42"
 //
-// "http://example.org:8080" -> "http_.//example.org_.8080"
+//	"http://example.org:8080" -> "http_.//example.org_.8080"
 //
-// "Björn's email: bjoern@soundcloud.com" ->
-// "Bj_C3_B6rn_27s_20email_._20bjoern_40soundcloud.com"
+//	"Björn's email: bjoern@soundcloud.com" ->
+//	"Bj_C3_B6rn_27s_20email_._20bjoern_40soundcloud.com"
 //
-// "日" -> "_E6_97_A5"
+//	"日" -> "_E6_97_A5"
 func (tv TagValue) MarshalJSON() ([]byte, error) {
 	length := len(tv)
 	// Need at least two more bytes than in tv.
 	result := bytes.NewBuffer(make([]byte, 0, length+2))
 	result.WriteByte('"')
-	for i := 0; i < length; i++ {
+	for i := range length {
 		b := tv[i]
 		switch {
 		case (b >= '-' && b <= '9') || // '-', '.', '/', 0-9
@@ -79,7 +78,7 @@ func (tv TagValue) MarshalJSON() ([]byte, error) {
 		case b == ':':
 			result.WriteString("_.")
 		default:
-			result.WriteString(fmt.Sprintf("_%X", b))
+			fmt.Fprintf(result, "_%X", b)
 		}
 	}
 	result.WriteByte('"')
@@ -98,13 +97,13 @@ func (tv *TagValue) UnmarshalJSON(json []byte) error {
 	for i, b := range json {
 		if i == 0 {
 			if b != '"' {
-				return errors.Errorf("expected '\"', got %q", b)
+				return fmt.Errorf("expected '\"', got %q", b)
 			}
 			continue
 		}
 		if i == len(json)-1 {
 			if b != '"' {
-				return errors.Errorf("expected '\"', got %q", b)
+				return fmt.Errorf("expected '\"', got %q", b)
 			}
 			break
 		}
@@ -130,7 +129,7 @@ func (tv *TagValue) UnmarshalJSON(json []byte) error {
 				parsedByte = (b - 55) << 4
 				escapeLevel = 2
 			default:
-				return errors.Errorf(
+				return fmt.Errorf(
 					"illegal escape sequence at byte %d (%c)",
 					i, b,
 				)
@@ -142,7 +141,7 @@ func (tv *TagValue) UnmarshalJSON(json []byte) error {
 			case b >= 'A' && b <= 'F': // A-F
 				parsedByte += b - 55
 			default:
-				return errors.Errorf(
+				return fmt.Errorf(
 					"illegal escape sequence at byte %d (%c)",
 					i, b,
 				)

@@ -1,4 +1,4 @@
-// Copyright 2017 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -14,49 +14,51 @@
 package chunkenc
 
 import (
+	"errors"
 	"fmt"
-	"io"
 	"math/rand"
-	"reflect"
 	"testing"
 
-	"github.com/prometheus/prometheus/util/testutil"
+	"github.com/stretchr/testify/require"
+
+	"github.com/prometheus/prometheus/model/histogram"
 )
 
-type pair struct {
-	t int64
-	v float64
+type triple struct {
+	st, t int64
+	v     float64
 }
 
 func TestChunk(t *testing.T) {
-	for enc, nc := range map[Encoding]func() Chunk{
-		EncXOR: func() Chunk { return NewXORChunk() },
-	} {
-		t.Run(fmt.Sprintf("%v", enc), func(t *testing.T) {
+	testcases := []struct {
+		encoding   Encoding
+		supportsST bool
+		factory    func() Chunk
+	}{
+		{encoding: EncXOR, supportsST: false, factory: func() Chunk { return NewXORChunk() }},
+		{encoding: EncXOR2, supportsST: true, factory: func() Chunk { return NewXOR2Chunk() }},
+	}
+	for _, tc := range testcases {
+		t.Run(fmt.Sprintf("%v", tc.encoding), func(t *testing.T) {
 			for range make([]struct{}, 1) {
-				c := nc()
-				if err := testChunk(c); err != nil {
-					t.Fatal(err)
-				}
+				c := tc.factory()
+				testChunk(t, c, tc.supportsST)
 			}
 		})
 	}
 }
 
-func testChunk(c Chunk) error {
+func testChunk(t *testing.T, c Chunk, supportsST bool) {
 	app, err := c.Appender()
-	if err != nil {
-		return err
-	}
+	require.NoError(t, err)
 
-	var exp []pair
+	var exp []triple
 	var (
 		ts = int64(1234123324)
 		v  = 1243535.123
 	)
-	for i := 0; i < 300; i++ {
+	for i := range 300 {
 		ts += int64(rand.Intn(10000) + 1)
-		// v = rand.Float64()
 		if i%2 == 0 {
 			v += float64(rand.Intn(1000000))
 		} else {
@@ -67,136 +69,223 @@ func testChunk(c Chunk) error {
 		// appending to a partially filled chunk.
 		if i%10 == 0 {
 			app, err = c.Appender()
-			if err != nil {
-				return err
-			}
+			require.NoError(t, err)
 		}
 
-		app.Append(ts, v)
-		exp = append(exp, pair{t: ts, v: v})
-		// fmt.Println("appended", len(c.Bytes()), c.Bytes())
+		app.Append(ts-100, ts, v)
+		expST := int64(0)
+		if supportsST {
+			expST = ts - 100
+		}
+		exp = append(exp, triple{st: expST, t: ts, v: v})
 	}
 
-	it := c.Iterator(nil)
-	var res []pair
-	for it.Next() {
-		ts, v := it.At()
-		res = append(res, pair{t: ts, v: v})
+	// 1. Expand iterator in simple case.
+	it1 := c.Iterator(nil)
+	var res1 []triple
+	for it1.Next() == ValFloat {
+		ts, v := it1.At()
+		res1 = append(res1, triple{st: it1.AtST(), t: ts, v: v})
 	}
-	if it.Err() != nil {
-		return it.Err()
+	require.NoError(t, it1.Err())
+	require.Equal(t, exp, res1)
+
+	// 2. Expand second iterator while reusing first one.
+	it2 := c.Iterator(it1)
+	var res2 []triple
+	for it2.Next() == ValFloat {
+		ts, v := it2.At()
+		res2 = append(res2, triple{st: it2.AtST(), t: ts, v: v})
 	}
-	if !reflect.DeepEqual(exp, res) {
-		return fmt.Errorf("unexpected result\n\ngot: %v\n\nexp: %v", res, exp)
+	require.NoError(t, it2.Err())
+	require.Equal(t, exp, res2)
+
+	// 3. Test iterator Seek.
+	mid := len(exp) / 2
+
+	it3 := c.Iterator(nil)
+	var res3 []triple
+	require.Equal(t, ValFloat, it3.Seek(exp[mid].t))
+	// Below ones should not matter.
+	require.Equal(t, ValFloat, it3.Seek(exp[mid].t))
+	require.Equal(t, ValFloat, it3.Seek(exp[mid].t))
+	ts, v = it3.At()
+	res3 = append(res3, triple{st: it3.AtST(), t: ts, v: v})
+
+	lastTs := ts
+	for it3.Next() == ValFloat {
+		ts, v := it3.At()
+		lastTs = ts
+		res3 = append(res3, triple{st: it3.AtST(), t: ts, v: v})
 	}
-	return nil
+	// Seeking to last timestamp should work and it is a no-op.
+	require.Equal(t, ValFloat, it3.Seek(lastTs))
+	require.NoError(t, it3.Err())
+	require.Equal(t, exp[mid:], res3)
+	require.Equal(t, ValNone, it3.Seek(exp[len(exp)-1].t+1))
 }
 
-func benchmarkIterator(b *testing.B, newChunk func() Chunk) {
-	var (
-		t = int64(1234123324)
-		v = 1243535.123
-	)
-	var exp []pair
-	for i := 0; i < b.N; i++ {
-		// t += int64(rand.Intn(10000) + 1)
-		t += int64(1000)
-		// v = rand.Float64()
-		v += float64(100)
-		exp = append(exp, pair{t: t, v: v})
-	}
-
-	var chunks []Chunk
-	for i := 0; i < b.N; {
-		c := newChunk()
-
-		a, err := c.Appender()
-		if err != nil {
-			b.Fatalf("get appender: %s", err)
-		}
-		j := 0
-		for _, p := range exp {
-			if j > 250 {
-				break
+func TestPool(t *testing.T) {
+	p := NewPool()
+	for _, tc := range []struct {
+		name     string
+		encoding Encoding
+		expErr   error
+	}{
+		{
+			name:     "xor",
+			encoding: EncXOR,
+		},
+		{
+			name:     "histogram",
+			encoding: EncHistogram,
+		},
+		{
+			name:     "float histogram",
+			encoding: EncFloatHistogram,
+		},
+		{
+			name:     "xor opt st",
+			encoding: EncXOR2,
+		},
+		{
+			name:     "histogram st",
+			encoding: EncHistogramST,
+		},
+		{
+			name:     "float histogram st",
+			encoding: EncFloatHistogramST,
+		},
+		{
+			name:     "invalid encoding",
+			encoding: EncNone,
+			expErr:   errors.New(`invalid chunk encoding "none"`),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := p.Get(tc.encoding, []byte("test"))
+			if tc.expErr != nil {
+				require.EqualError(t, err, tc.expErr.Error())
+				return
 			}
-			a.Append(p.t, p.v)
-			i++
-			j++
-		}
-		chunks = append(chunks, c)
+
+			require.NoError(t, err)
+
+			var b *bstream
+			switch tc.encoding {
+			case EncHistogram:
+				b = &c.(*HistogramChunk).b
+			case EncFloatHistogram:
+				b = &c.(*FloatHistogramChunk).b
+			case EncXOR2:
+				b = &c.(*XOR2Chunk).b
+			case EncHistogramST:
+				b = &c.(*HistogramSTChunk).b
+			case EncFloatHistogramST:
+				b = &c.(*FloatHistogramSTChunk).b
+			default:
+				b = &c.(*XORChunk).b
+			}
+
+			require.Equal(t, &bstream{
+				stream: []byte("test"),
+				count:  0,
+			}, b)
+
+			b.count = 1
+			require.NoError(t, p.Put(c))
+			require.Equal(t, &bstream{
+				stream: nil,
+				count:  0,
+			}, b)
+		})
 	}
 
-	b.ReportAllocs()
-	b.ResetTimer()
-
-	fmt.Println("num", b.N, "created chunks", len(chunks))
-
-	res := make([]float64, 0, 1024)
-
-	var it Iterator
-	for i := 0; i < len(chunks); i++ {
-		c := chunks[i]
-		it := c.Iterator(it)
-
-		for it.Next() {
-			_, v := it.At()
-			res = append(res, v)
+	t.Run("put bad chunk wrapper", func(t *testing.T) {
+		// When a wrapping chunk poses as an encoding it can't be converted to, Put should skip it.
+		c := fakeChunk{
+			encoding: EncXOR,
+			t:        t,
 		}
-		if it.Err() != io.EOF {
-			testutil.Ok(b, it.Err())
+		require.NoError(t, p.Put(c))
+	})
+	t.Run("put invalid encoding", func(t *testing.T) {
+		c := fakeChunk{
+			encoding: EncNone,
+			t:        t,
 		}
-		res = res[:0]
-	}
-}
-
-func BenchmarkXORIterator(b *testing.B) {
-	benchmarkIterator(b, func() Chunk {
-		return NewXORChunk()
+		require.EqualError(t, p.Put(c), `invalid chunk encoding "none"`)
 	})
 }
 
-func BenchmarkXORAppender(b *testing.B) {
-	benchmarkAppender(b, func() Chunk {
-		return NewXORChunk()
+type fakeChunk struct {
+	Chunk
+
+	encoding Encoding
+	t        *testing.T
+}
+
+func (c fakeChunk) Encoding() Encoding {
+	return c.encoding
+}
+
+func (c fakeChunk) Reset([]byte) {
+	c.t.Fatal("Reset should not be called")
+}
+
+func testChunkOverFlowPanics(t *testing.T, e Encoding, vt ValueType) {
+	chunk, err := NewEmptyChunk(e)
+	require.NoError(t, err)
+	app, err := chunk.Appender()
+	require.NoError(t, err)
+
+	require.PanicsWithValue(t, "chunk capacity exceeded", func() {
+		for i := range int64(1000000) {
+			switch vt {
+			case ValFloat:
+				app.Append(0, i, float64(i))
+			case ValHistogram:
+				app.AppendHistogram(nil, 0, i, &histogram.Histogram{Count: uint64(i), ZeroThreshold: 1e-128, ZeroCount: uint64(i)}, true)
+			case ValFloatHistogram:
+				app.AppendFloatHistogram(nil, 0, i, &histogram.FloatHistogram{Count: float64(i), ZeroThreshold: 1e-128, ZeroCount: float64(i)}, true)
+			}
+		}
 	})
 }
 
-func benchmarkAppender(b *testing.B, newChunk func() Chunk) {
-	var (
-		t = int64(1234123324)
-		v = 1243535.123
-	)
-	var exp []pair
-	for i := 0; i < b.N; i++ {
-		// t += int64(rand.Intn(10000) + 1)
-		t += int64(1000)
-		// v = rand.Float64()
-		v += float64(100)
-		exp = append(exp, pair{t: t, v: v})
+func TestCompatibleValues(t *testing.T) {
+	// CompatibleValues is about whether a chunk can continue to receive appends for a
+	// different encoding without being cut. Only the XOR float family (EncXOR and
+	// EncXOR2) is mutually compatible. All other pairs — including same-type
+	// histogram pairs — return false because histogram encodings are not part of the
+	// XOR family and no cross-family compatibility is defined.
+	cases := []struct {
+		a, b Encoding
+		want bool
+	}{
+		{EncXOR, EncXOR, true},
+		{EncXOR2, EncXOR2, true},
+		{EncXOR, EncXOR2, true},
+		{EncXOR2, EncXOR, true},
+		{EncHistogram, EncHistogram, false},
+		{EncHistogram, EncFloatHistogram, false},
+		{EncFloatHistogram, EncHistogram, false},
+		{EncFloatHistogram, EncFloatHistogram, false},
+		{EncXOR, EncHistogram, false},
+		{EncXOR2, EncHistogram, false},
+		{EncXOR, EncFloatHistogram, false},
+		{EncXOR2, EncFloatHistogram, false},
+		{EncHistogram, EncXOR, false},
+		{EncHistogram, EncXOR2, false},
+		{EncFloatHistogram, EncXOR, false},
+		{EncFloatHistogram, EncXOR2, false},
+		{EncNone, EncXOR, false},
+		{EncNone, EncXOR2, false},
+		{EncXOR, EncNone, false},
+		{EncXOR2, EncNone, false},
+		{EncNone, EncNone, false},
 	}
-
-	b.ReportAllocs()
-	b.ResetTimer()
-
-	var chunks []Chunk
-	for i := 0; i < b.N; {
-		c := newChunk()
-
-		a, err := c.Appender()
-		if err != nil {
-			b.Fatalf("get appender: %s", err)
-		}
-		j := 0
-		for _, p := range exp {
-			if j > 250 {
-				break
-			}
-			a.Append(p.t, p.v)
-			i++
-			j++
-		}
-		chunks = append(chunks, c)
+	for _, tc := range cases {
+		require.Equal(t, tc.want, CompatibleValues(tc.a, tc.b), "CompatibleValues(%v, %v)", tc.a, tc.b)
 	}
-
-	fmt.Println("num", b.N, "created chunks", len(chunks))
 }

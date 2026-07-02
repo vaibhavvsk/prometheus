@@ -1,4 +1,4 @@
-// Copyright 2019 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,25 +15,32 @@ package dns
 
 import (
 	"context"
-	"fmt"
+	"errors"
+	"log/slog"
 	"net"
 	"testing"
 	"time"
 
-	"github.com/go-kit/kit/log"
 	"github.com/miekg/dns"
-	"gopkg.in/yaml.v2"
-
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
+	"go.yaml.in/yaml/v2"
+
+	"github.com/prometheus/prometheus/discovery"
 	"github.com/prometheus/prometheus/discovery/targetgroup"
-	"github.com/prometheus/prometheus/util/testutil"
 )
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
+}
 
 func TestDNS(t *testing.T) {
 	testCases := []struct {
 		name   string
 		config SDConfig
-		lookup func(name string, qtype uint16, logger log.Logger) (*dns.Msg, error)
+		lookup func(name string, qtype uint16, logger *slog.Logger) (*dns.Msg, error)
 
 		expected []*targetgroup.Group
 	}{
@@ -45,8 +52,8 @@ func TestDNS(t *testing.T) {
 				Port:            80,
 				Type:            "A",
 			},
-			lookup: func(name string, qtype uint16, logger log.Logger) (*dns.Msg, error) {
-				return nil, fmt.Errorf("some error")
+			lookup: func(string, uint16, *slog.Logger) (*dns.Msg, error) {
+				return nil, errors.New("some error")
 			},
 			expected: []*targetgroup.Group{},
 		},
@@ -58,7 +65,7 @@ func TestDNS(t *testing.T) {
 				Port:            80,
 				Type:            "A",
 			},
-			lookup: func(name string, qtype uint16, logger log.Logger) (*dns.Msg, error) {
+			lookup: func(string, uint16, *slog.Logger) (*dns.Msg, error) {
 				return &dns.Msg{
 						Answer: []dns.RR{
 							&dns.A{A: net.IPv4(192, 0, 2, 2)},
@@ -70,7 +77,14 @@ func TestDNS(t *testing.T) {
 				{
 					Source: "web.example.com.",
 					Targets: []model.LabelSet{
-						{"__address__": "192.0.2.2:80", "__meta_dns_name": "web.example.com."},
+						{
+							"__address__":                  "192.0.2.2:80",
+							"__meta_dns_name":              "web.example.com.",
+							"__meta_dns_srv_record_target": "",
+							"__meta_dns_srv_record_port":   "",
+							"__meta_dns_mx_record_target":  "",
+							"__meta_dns_ns_record_target":  "",
+						},
 					},
 				},
 			},
@@ -83,7 +97,7 @@ func TestDNS(t *testing.T) {
 				Port:            80,
 				Type:            "AAAA",
 			},
-			lookup: func(name string, qtype uint16, logger log.Logger) (*dns.Msg, error) {
+			lookup: func(string, uint16, *slog.Logger) (*dns.Msg, error) {
 				return &dns.Msg{
 						Answer: []dns.RR{
 							&dns.AAAA{AAAA: net.IPv6loopback},
@@ -95,7 +109,14 @@ func TestDNS(t *testing.T) {
 				{
 					Source: "web.example.com.",
 					Targets: []model.LabelSet{
-						{"__address__": "[::1]:80", "__meta_dns_name": "web.example.com."},
+						{
+							"__address__":                  "[::1]:80",
+							"__meta_dns_name":              "web.example.com.",
+							"__meta_dns_srv_record_target": "",
+							"__meta_dns_srv_record_port":   "",
+							"__meta_dns_mx_record_target":  "",
+							"__meta_dns_ns_record_target":  "",
+						},
 					},
 				},
 			},
@@ -107,7 +128,7 @@ func TestDNS(t *testing.T) {
 				Type:            "SRV",
 				RefreshInterval: model.Duration(time.Minute),
 			},
-			lookup: func(name string, qtype uint16, logger log.Logger) (*dns.Msg, error) {
+			lookup: func(string, uint16, *slog.Logger) (*dns.Msg, error) {
 				return &dns.Msg{
 						Answer: []dns.RR{
 							&dns.SRV{Port: 3306, Target: "db1.example.com."},
@@ -120,8 +141,22 @@ func TestDNS(t *testing.T) {
 				{
 					Source: "_mysql._tcp.db.example.com.",
 					Targets: []model.LabelSet{
-						{"__address__": "db1.example.com:3306", "__meta_dns_name": "_mysql._tcp.db.example.com."},
-						{"__address__": "db2.example.com:3306", "__meta_dns_name": "_mysql._tcp.db.example.com."},
+						{
+							"__address__":                  "db1.example.com:3306",
+							"__meta_dns_name":              "_mysql._tcp.db.example.com.",
+							"__meta_dns_srv_record_target": "db1.example.com.",
+							"__meta_dns_srv_record_port":   "3306",
+							"__meta_dns_mx_record_target":  "",
+							"__meta_dns_ns_record_target":  "",
+						},
+						{
+							"__address__":                  "db2.example.com:3306",
+							"__meta_dns_name":              "_mysql._tcp.db.example.com.",
+							"__meta_dns_srv_record_target": "db2.example.com.",
+							"__meta_dns_srv_record_port":   "3306",
+							"__meta_dns_mx_record_target":  "",
+							"__meta_dns_ns_record_target":  "",
+						},
 					},
 				},
 			},
@@ -132,7 +167,7 @@ func TestDNS(t *testing.T) {
 				Names:           []string{"_mysql._tcp.db.example.com."},
 				RefreshInterval: model.Duration(time.Minute),
 			},
-			lookup: func(name string, qtype uint16, logger log.Logger) (*dns.Msg, error) {
+			lookup: func(string, uint16, *slog.Logger) (*dns.Msg, error) {
 				return &dns.Msg{
 						Answer: []dns.RR{
 							&dns.SRV{Port: 3306, Target: "db1.example.com."},
@@ -145,7 +180,14 @@ func TestDNS(t *testing.T) {
 				{
 					Source: "_mysql._tcp.db.example.com.",
 					Targets: []model.LabelSet{
-						{"__address__": "db1.example.com:3306", "__meta_dns_name": "_mysql._tcp.db.example.com."},
+						{
+							"__address__":                  "db1.example.com:3306",
+							"__meta_dns_name":              "_mysql._tcp.db.example.com.",
+							"__meta_dns_srv_record_target": "db1.example.com.",
+							"__meta_dns_srv_record_port":   "3306",
+							"__meta_dns_mx_record_target":  "",
+							"__meta_dns_ns_record_target":  "",
+						},
 					},
 				},
 			},
@@ -156,7 +198,7 @@ func TestDNS(t *testing.T) {
 				Names:           []string{"_mysql._tcp.db.example.com."},
 				RefreshInterval: model.Duration(time.Minute),
 			},
-			lookup: func(name string, qtype uint16, logger log.Logger) (*dns.Msg, error) {
+			lookup: func(string, uint16, *slog.Logger) (*dns.Msg, error) {
 				return &dns.Msg{}, nil
 			},
 			expected: []*targetgroup.Group{
@@ -165,18 +207,71 @@ func TestDNS(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "MX record query",
+			config: SDConfig{
+				Names:           []string{"example.com."},
+				Type:            "MX",
+				Port:            25,
+				RefreshInterval: model.Duration(time.Minute),
+			},
+			lookup: func(string, uint16, *slog.Logger) (*dns.Msg, error) {
+				return &dns.Msg{
+						Answer: []dns.RR{
+							&dns.MX{Preference: 0, Mx: "smtp1.example.com."},
+							&dns.MX{Preference: 10, Mx: "smtp2.example.com."},
+						},
+					},
+					nil
+			},
+			expected: []*targetgroup.Group{
+				{
+					Source: "example.com.",
+					Targets: []model.LabelSet{
+						{
+							"__address__":                  "smtp1.example.com:25",
+							"__meta_dns_name":              "example.com.",
+							"__meta_dns_srv_record_target": "",
+							"__meta_dns_srv_record_port":   "",
+							"__meta_dns_mx_record_target":  "smtp1.example.com.",
+							"__meta_dns_ns_record_target":  "",
+						},
+						{
+							"__address__":                  "smtp2.example.com:25",
+							"__meta_dns_name":              "example.com.",
+							"__meta_dns_srv_record_target": "",
+							"__meta_dns_srv_record_port":   "",
+							"__meta_dns_mx_record_target":  "smtp2.example.com.",
+							"__meta_dns_ns_record_target":  "",
+						},
+					},
+				},
+			},
+		},
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			sd := NewDiscovery(tc.config, nil)
+
+			reg := prometheus.NewRegistry()
+			refreshMetrics := discovery.NewRefreshMetrics(reg)
+			metrics := tc.config.NewDiscovererMetrics(reg, refreshMetrics)
+			require.NoError(t, metrics.Register())
+
+			sd, err := NewDiscovery(tc.config, discovery.DiscovererOptions{
+				Logger:  nil,
+				Metrics: metrics,
+				SetName: "dns",
+			})
+			require.NoError(t, err)
 			sd.lookupFn = tc.lookup
 
 			tgs, err := sd.refresh(context.Background())
-			testutil.Ok(t, err)
-			testutil.Equals(t, tc.expected, tgs)
+			require.NoError(t, err)
+			require.Equal(t, tc.expected, tgs)
+
+			metrics.Unregister()
 		})
 	}
 }
@@ -190,8 +285,8 @@ func TestSDConfigUnmarshalYAML(t *testing.T) {
 		return d
 	}
 
-	unmarshal := func(d []byte) func(interface{}) error {
-		return func(o interface{}) error {
+	unmarshal := func(d []byte) func(any) error {
+		return func(o any) error {
 			return yaml.Unmarshal(d, o)
 		}
 	}
@@ -266,7 +361,7 @@ func TestSDConfigUnmarshalYAML(t *testing.T) {
 			var config SDConfig
 			d := marshal(c.input)
 			err := config.UnmarshalYAML(unmarshal(d))
-			testutil.Equals(t, c.expectErr, err != nil)
+			require.Equal(t, c.expectErr, err != nil)
 		})
 	}
 }

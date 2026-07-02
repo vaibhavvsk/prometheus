@@ -1,4 +1,4 @@
-// Copyright 2019 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,15 +15,15 @@ package index
 import (
 	"testing"
 
-	"github.com/prometheus/prometheus/util/testutil"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPostingsStats(t *testing.T) {
 	stats := &maxHeap{}
-	max := 3000000
-	heapLength := 10
+	const maxCount = 3000000
+	const heapLength = 10
 	stats.init(heapLength)
-	for i := 0; i < max; i++ {
+	for i := range maxCount {
 		item := Stat{
 			Name:  "Label-da",
 			Count: uint64(i),
@@ -33,16 +33,15 @@ func TestPostingsStats(t *testing.T) {
 	stats.push(Stat{Name: "Stuff", Count: 3000000})
 
 	data := stats.get()
-	testutil.Equals(t, 10, len(data))
-	for i := 0; i < heapLength; i++ {
-		testutil.Equals(t, uint64(max-i), data[i].Count)
+	require.Len(t, data, 10)
+	for i := range heapLength {
+		require.Equal(t, uint64(maxCount-i), data[i].Count)
 	}
-
 }
 
 func TestPostingsStats2(t *testing.T) {
 	stats := &maxHeap{}
-	heapLength := 10
+	const heapLength = 10
 
 	stats.init(heapLength)
 	stats.push(Stat{Name: "Stuff", Count: 10})
@@ -52,17 +51,18 @@ func TestPostingsStats2(t *testing.T) {
 
 	data := stats.get()
 
-	testutil.Equals(t, 4, len(data))
-	testutil.Equals(t, uint64(11), data[0].Count)
+	require.Len(t, data, 4)
+	require.Equal(t, uint64(11), data[0].Count)
 }
+
 func BenchmarkPostingStatsMaxHep(b *testing.B) {
 	stats := &maxHeap{}
-	max := 9000000
-	heapLength := 10
-	b.ResetTimer()
-	for n := 0; n < b.N; n++ {
+	const maxCount = 9000000
+	const heapLength = 10
+
+	for b.Loop() {
 		stats.init(heapLength)
-		for i := 0; i < max; i++ {
+		for i := range maxCount {
 			item := Stat{
 				Name:  "Label-da",
 				Count: uint64(i),
@@ -71,5 +71,4 @@ func BenchmarkPostingStatsMaxHep(b *testing.B) {
 		}
 		stats.get()
 	}
-
 }

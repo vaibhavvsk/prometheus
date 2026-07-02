@@ -1,4 +1,4 @@
-// Copyright 2015 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -11,17 +11,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package promql
+package promql_test
 
 import (
 	"context"
 	"testing"
 	"time"
 
-	"github.com/prometheus/prometheus/pkg/labels"
-	"github.com/prometheus/prometheus/pkg/timestamp"
+	"github.com/stretchr/testify/require"
+
+	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/model/timestamp"
+	"github.com/prometheus/prometheus/promql"
+	"github.com/prometheus/prometheus/promql/parser"
+	"github.com/prometheus/prometheus/promql/promqltest"
 	"github.com/prometheus/prometheus/util/teststorage"
-	"github.com/prometheus/prometheus/util/testutil"
 )
 
 func TestDeriv(t *testing.T) {
@@ -29,32 +33,51 @@ func TestDeriv(t *testing.T) {
 	// This requires more precision than the usual test system offers,
 	// so we test it by hand.
 	storage := teststorage.New(t)
-	defer storage.Close()
-	opts := EngineOpts{
+
+	opts := promql.EngineOpts{
 		Logger:     nil,
 		Reg:        nil,
 		MaxSamples: 10000,
 		Timeout:    10 * time.Second,
 	}
-	engine := NewEngine(opts)
+	engine := promqltest.NewTestEngineWithOpts(t, opts)
 
-	a, err := storage.Appender()
-	testutil.Ok(t, err)
+	a := storage.Appender(context.Background())
 
+	var start, interval, i int64
 	metric := labels.FromStrings("__name__", "foo")
-	a.Add(metric, 1493712816939, 1.0)
-	a.Add(metric, 1493712846939, 1.0)
+	start = 1493712816939
+	interval = 30 * 1000
+	// Introduce some timestamp jitter to test 0 slope case.
+	// https://github.com/prometheus/prometheus/issues/7180
+	for i = range int64(15) {
+		jitter := 12 * i % 2
+		a.Append(0, metric, start+interval*i+jitter, 1)
+	}
 
-	err = a.Commit()
-	testutil.Ok(t, err)
+	require.NoError(t, a.Commit())
 
-	query, err := engine.NewInstantQuery(storage, "deriv(foo[30m])", timestamp.Time(1493712846939))
-	testutil.Ok(t, err)
+	ctx := context.Background()
+	query, err := engine.NewInstantQuery(ctx, storage, nil, "deriv(foo[30m])", timestamp.Time(1493712846939))
+	require.NoError(t, err)
 
-	result := query.Exec(context.Background())
-	testutil.Ok(t, result.Err)
+	result := query.Exec(ctx)
+	require.NoError(t, result.Err)
 
 	vec, _ := result.Vector()
-	testutil.Assert(t, len(vec) == 1, "Expected 1 result, got %d", len(vec))
-	testutil.Assert(t, vec[0].V == 0.0, "Expected 0.0 as value, got %f", vec[0].V)
+	require.Len(t, vec, 1, "Expected 1 result, got %d", len(vec))
+	require.Equal(t, 0.0, vec[0].F, "Expected 0.0 as value, got %f", vec[0].F)
+}
+
+func TestFunctionList(t *testing.T) {
+	// Test that Functions and parser.Functions list the same functions.
+	for i := range promql.FunctionCalls {
+		_, ok := parser.Functions[i]
+		require.True(t, ok, "function %s exists in promql package, but not in parser package", i)
+	}
+
+	for i := range parser.Functions {
+		_, ok := promql.FunctionCalls[i]
+		require.True(t, ok, "function %s exists in parser package, but not in promql package", i)
+	}
 }

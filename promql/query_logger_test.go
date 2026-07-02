@@ -1,4 +1,4 @@
-// Copyright 2019 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,18 +15,18 @@ package promql
 
 import (
 	"context"
-	"io/ioutil"
 	"os"
-	"regexp"
+	"path/filepath"
 	"testing"
 
-	"github.com/prometheus/prometheus/util/testutil"
+	"github.com/grafana/regexp"
+	"github.com/stretchr/testify/require"
 )
 
 func TestQueryLogging(t *testing.T) {
 	fileAsBytes := make([]byte, 4096)
 	queryLogger := ActiveQueryTracker{
-		mmapedFile:   fileAsBytes,
+		mmappedFile:  fileAsBytes,
 		logger:       nil,
 		getNextIndex: make(chan int, 4),
 	}
@@ -48,31 +48,29 @@ func TestQueryLogging(t *testing.T) {
 	}
 
 	// Check for inserts of queries.
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		start := 1 + i*entrySize
 		end := start + entrySize
 
 		queryLogger.Insert(context.Background(), queries[i])
 
 		have := string(fileAsBytes[start:end])
-		if !regexp.MustCompile(want[i]).MatchString(have) {
-			t.Fatalf("Query not written correctly: %s.\nHave %s\nWant %s", queries[i], have, want[i])
-		}
+		require.True(t, regexp.MustCompile(want[i]).MatchString(have),
+			"Query not written correctly: %s", queries[i])
 	}
 
 	// Check if all queries have been deleted.
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		queryLogger.Delete(1 + i*entrySize)
 	}
-	if !regexp.MustCompile(`^\x00+$`).Match(fileAsBytes[1 : 1+entrySize*4]) {
-		t.Fatalf("All queries not deleted properly. Have %s\nWant only null bytes \\x00", string(fileAsBytes[1:1+entrySize*4]))
-	}
+	require.True(t, regexp.MustCompile(`^\x00+$`).Match(fileAsBytes[1:1+entrySize*4]),
+		"All queries not deleted properly. Want only null bytes \\x00")
 }
 
 func TestIndexReuse(t *testing.T) {
 	queryBytes := make([]byte, 1+3*entrySize)
 	queryLogger := ActiveQueryTracker{
-		mmapedFile:   queryBytes,
+		mmappedFile:  queryBytes,
 		logger:       nil,
 		getNextIndex: make(chan int, 3),
 	}
@@ -96,41 +94,77 @@ func TestIndexReuse(t *testing.T) {
 	}
 
 	// Check all bytes and verify new query was inserted at index 2
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		start := 1 + i*entrySize
 		end := start + entrySize
 
 		have := queryBytes[start:end]
-		if !regexp.MustCompile(want[i]).Match(have) {
-			t.Fatalf("Index not reused properly:\nHave %s\nWant %s", string(queryBytes[start:end]), want[i])
-		}
+		require.True(t, regexp.MustCompile(want[i]).Match(have),
+			"Index not reused properly.")
 	}
 }
 
 func TestMMapFile(t *testing.T) {
-	file, err := ioutil.TempFile("", "mmapedFile")
-	testutil.Ok(t, err)
+	dir := t.TempDir()
+	fpath := filepath.Join(dir, "mmappedFile")
+	const data = "ab"
 
-	filename := file.Name()
-	defer os.Remove(filename)
+	fileAsBytes, closer, err := getMMappedFile(fpath, 2, nil)
+	require.NoError(t, err)
+	copy(fileAsBytes, data)
+	require.NoError(t, closer.Close())
 
-	fileAsBytes, err := getMMapedFile(filename, 2, nil)
-
-	testutil.Ok(t, err)
-	copy(fileAsBytes, "ab")
-
-	f, err := os.Open(filename)
-	testutil.Ok(t, err)
+	f, err := os.Open(fpath)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = f.Close()
+	})
 
 	bytes := make([]byte, 4)
 	n, err := f.Read(bytes)
+	require.NoError(t, err, "Unexpected error while reading file.")
+	require.Equal(t, 2, n)
+	require.Equal(t, []byte(data), bytes[:2], "Mmap failed")
+}
 
-	if n != 2 || err != nil {
-		t.Fatalf("Error reading file")
-	}
-
-	if string(bytes[:2]) != string(fileAsBytes) {
-		t.Fatalf("Mmap failed")
+func TestTrimStringByBytes(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		input    string
+		size     int
+		expected string
+	}{
+		{
+			name:     "normal ASCII string",
+			input:    "hello",
+			size:     3,
+			expected: "hel",
+		},
+		{
+			name:     "no trimming needed",
+			input:    "hi",
+			size:     10,
+			expected: "hi",
+		},
+		{
+			name:     "UTF-8 multibyte character boundary",
+			input:    "日本", // 6 bytes (3 bytes per character)
+			size:     4,
+			expected: "日", // trims back to complete character boundary
+		},
+		{
+			name:     "invalid UTF-8 continuation-only bytes",
+			input:    string([]byte{0x80, 0x81, 0x82, 0x83, 0x84}), // only continuation bytes
+			size:     4,
+			expected: "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NotPanics(t, func() {
+				result := trimStringByBytes(tc.input, tc.size)
+				require.Equal(t, tc.expected, result)
+			})
+		})
 	}
 }
 
@@ -162,13 +196,10 @@ func TestParseBrokenJSON(t *testing.T) {
 		},
 	} {
 		t.Run("", func(t *testing.T) {
-			ok, out := parseBrokenJSON(tc.b)
-			if tc.ok != ok {
-				t.Fatalf("expected %t, got %t", tc.ok, ok)
-				return
-			}
-			if ok && tc.out != out {
-				t.Fatalf("expected %s, got %s", tc.out, out)
+			out, ok := parseBrokenJSON(tc.b)
+			require.Equal(t, tc.ok, ok)
+			if ok {
+				require.Equal(t, tc.out, out)
 			}
 		})
 	}

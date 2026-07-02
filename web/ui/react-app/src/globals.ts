@@ -1,4 +1,5 @@
 import jquery from 'jquery';
+import moment from 'moment';
 
-(window as any).jQuery = jquery;
-(window as any).moment = require('moment');
+window.jQuery = jquery;
+window.moment = moment;

@@ -1,4 +1,4 @@
-// Copyright 2020 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -17,7 +17,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -29,6 +29,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/prometheus/prometheus/util/testutil"
 )
@@ -66,38 +68,31 @@ func (p *queryLogTest) skip(t *testing.T) {
 }
 
 // waitForPrometheus waits for Prometheus to be ready.
-func (p *queryLogTest) waitForPrometheus() error {
-	var err error
-	for x := 0; x < 20; x++ {
-		var r *http.Response
-		if r, err = http.Get(fmt.Sprintf("http://%s:%d%s/-/ready", p.host, p.port, p.prefix)); err == nil && r.StatusCode == 200 {
-			break
+func (p *queryLogTest) waitForPrometheus(t *testing.T) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		r, err := http.Get(fmt.Sprintf("http://%s:%d%s/-/ready", p.host, p.port, p.prefix))
+		if err != nil {
+			return false
 		}
-		time.Sleep(500 * time.Millisecond)
-	}
-	return err
+		r.Body.Close()
+		return r.StatusCode == http.StatusOK
+	}, 20*time.Second, 500*time.Millisecond, "prometheus at %s:%d did not become ready in time", p.host, p.port)
 }
 
 // setQueryLog alters the configuration file to enable or disable the query log,
 // then reloads the configuration if needed.
 func (p *queryLogTest) setQueryLog(t *testing.T, queryLogFile string) {
 	err := p.configFile.Truncate(0)
-	testutil.Ok(t, err)
+	require.NoError(t, err)
 	_, err = p.configFile.Seek(0, 0)
-	testutil.Ok(t, err)
+	require.NoError(t, err)
 	if queryLogFile != "" {
-		_, err = p.configFile.Write([]byte(fmt.Sprintf("global:\n  query_log_file: %s\n", queryLogFile)))
-		testutil.Ok(t, err)
+		_, err = fmt.Fprintf(p.configFile, "global:\n  query_log_file: %s\n", queryLogFile)
+		require.NoError(t, err)
 	}
 	_, err = p.configFile.Write([]byte(p.configuration()))
-	testutil.Ok(t, err)
-}
-
-// reloadConfig reloads the configuration using POST.
-func (p *queryLogTest) reloadConfig(t *testing.T) {
-	r, err := http.Post(fmt.Sprintf("http://%s:%d%s/-/reload", p.host, p.port, p.prefix), "text/plain", nil)
-	testutil.Ok(t, err)
-	testutil.Equals(t, 200, r.StatusCode)
+	require.NoError(t, err)
 }
 
 // query runs a query according to the test origin.
@@ -111,8 +106,8 @@ func (p *queryLogTest) query(t *testing.T) {
 			p.prefix,
 			url.QueryEscape("query_with_api"),
 		))
-		testutil.Ok(t, err)
-		testutil.Equals(t, 200, r.StatusCode)
+		require.NoError(t, err)
+		require.Equal(t, 200, r.StatusCode)
 	case consoleOrigin:
 		r, err := http.Get(fmt.Sprintf(
 			"http://%s:%d%s/consoles/test.html",
@@ -120,13 +115,62 @@ func (p *queryLogTest) query(t *testing.T) {
 			p.port,
 			p.prefix,
 		))
-		testutil.Ok(t, err)
-		testutil.Equals(t, 200, r.StatusCode)
+		require.NoError(t, err)
+		require.Equal(t, 200, r.StatusCode)
 	case ruleOrigin:
-		time.Sleep(2 * time.Second)
+		// Poll the /api/v1/rules endpoint until a new rule evaluation is detected.
+		var lastEvalTime time.Time
+		for {
+			r, err := http.Get(fmt.Sprintf("http://%s:%d/api/v1/rules", p.host, p.port))
+			require.NoError(t, err)
+
+			rulesBody, err := io.ReadAll(r.Body)
+			require.NoError(t, err)
+			defer r.Body.Close()
+
+			// Parse the rules response to find the last evaluation time.
+			newEvalTime := parseLastEvaluation(rulesBody)
+			if newEvalTime.After(lastEvalTime) {
+				if !lastEvalTime.IsZero() {
+					break
+				}
+				lastEvalTime = newEvalTime
+			}
+
+			time.Sleep(100 * time.Millisecond)
+		}
 	default:
 		panic("can't query this origin")
 	}
+}
+
+// parseLastEvaluation extracts the last evaluation timestamp from the /api/v1/rules response.
+func parseLastEvaluation(rulesBody []byte) time.Time {
+	var ruleResponse struct {
+		Status string `json:"status"`
+		Data   struct {
+			Groups []struct {
+				Rules []struct {
+					LastEvaluation string `json:"lastEvaluation"`
+				} `json:"rules"`
+			} `json:"groups"`
+		} `json:"data"`
+	}
+
+	err := json.Unmarshal(rulesBody, &ruleResponse)
+	if err != nil {
+		return time.Time{}
+	}
+
+	for _, group := range ruleResponse.Data.Groups {
+		for _, rule := range group.Rules {
+			if evalTime, err := time.Parse(time.RFC3339Nano, rule.LastEvaluation); err == nil {
+				return evalTime
+			}
+		}
+	}
+
+	return time.Time{}
 }
 
 // queryString returns the expected queryString of a this test.
@@ -147,15 +191,15 @@ func (p *queryLogTest) queryString() string {
 // test parameters.
 func (p *queryLogTest) validateLastQuery(t *testing.T, ql []queryLogLine) {
 	q := ql[len(ql)-1]
-	testutil.Equals(t, p.queryString(), q.Params.Query)
+	require.Equal(t, p.queryString(), q.Params.Query)
 
 	switch p.origin {
 	case apiOrigin:
-		testutil.Equals(t, 5, q.Params.Step)
-		testutil.Equals(t, "1970-01-01T00:00:00.000Z", q.Params.Start)
-		testutil.Equals(t, "1970-01-01T01:00:00.000Z", q.Params.End)
+		require.Equal(t, 5, q.Params.Step)
+		require.Equal(t, "1970-01-01T00:00:00.000Z", q.Params.Start)
+		require.Equal(t, "1970-01-01T01:00:00.000Z", q.Params.End)
 	default:
-		testutil.Equals(t, 0, q.Params.Step)
+		require.Equal(t, 0, q.Params.Step)
 	}
 
 	if p.origin != ruleOrigin {
@@ -163,17 +207,17 @@ func (p *queryLogTest) validateLastQuery(t *testing.T, ql []queryLogLine) {
 		if host == "[::1]" {
 			host = "::1"
 		}
-		testutil.Equals(t, host, q.Request.ClientIP)
+		require.Equal(t, host, q.Request.ClientIP)
 	}
 
 	switch p.origin {
 	case apiOrigin:
-		testutil.Equals(t, p.prefix+"/api/v1/query_range", q.Request.Path)
+		require.Equal(t, p.prefix+"/api/v1/query_range", q.Request.Path)
 	case consoleOrigin:
-		testutil.Equals(t, p.prefix+"/consoles/test.html", q.Request.Path)
+		require.Equal(t, p.prefix+"/consoles/test.html", q.Request.Path)
 	case ruleOrigin:
-		testutil.Equals(t, "querylogtest", q.RuleGroup.Name)
-		testutil.Equals(t, filepath.Join(p.cwd, "testdata", "rules", "test.yml"), q.RuleGroup.File)
+		require.Equal(t, "querylogtest", q.RuleGroup.Name)
+		require.Equal(t, filepath.Join(p.cwd, "testdata", "rules", "test.yml"), q.RuleGroup.File)
 	default:
 		panic("unknown origin")
 	}
@@ -191,7 +235,7 @@ func (p *queryLogTest) String() string {
 	}
 	name = name + ", " + p.host + ":" + strconv.Itoa(p.port)
 	if p.enabledAtStart {
-		name = name + ", enabled at start"
+		name += ", enabled at start"
 	}
 	if p.prefix != "" {
 		name = name + ", with prefix " + p.prefix
@@ -206,7 +250,7 @@ func (p *queryLogTest) params() []string {
 		s = append(s, "--web.route-prefix="+p.prefix)
 	}
 	if p.origin == consoleOrigin {
-		s = append(s, "--web.console.templates="+filepath.Join("testdata", "consoles"))
+		s = append(s, "--web.console.templates="+filepath.Join(p.cwd, "testdata", "consoles"))
 	}
 	return s
 }
@@ -222,7 +266,7 @@ func (p *queryLogTest) configuration() string {
 	}
 }
 
-// exactQueryCount returns wheter we can match an exact query count. False on
+// exactQueryCount returns whether we can match an exact query count. False on
 // recording rules are they are regular time intervals.
 func (p *queryLogTest) exactQueryCount() bool {
 	return p.origin != ruleOrigin
@@ -233,11 +277,11 @@ func (p *queryLogTest) run(t *testing.T) {
 	p.skip(t)
 
 	// Setup temporary files for this test.
-	queryLogFile, err := ioutil.TempFile("", "query")
-	testutil.Ok(t, err)
+	queryLogFile, err := os.CreateTemp("", "query")
+	require.NoError(t, err)
 	defer os.Remove(queryLogFile.Name())
-	p.configFile, err = ioutil.TempFile("", "config")
-	testutil.Ok(t, err)
+	p.configFile, err = os.CreateTemp("", "config")
+	require.NoError(t, err)
 	defer os.Remove(p.configFile.Name())
 
 	if p.enabledAtStart {
@@ -246,52 +290,62 @@ func (p *queryLogTest) run(t *testing.T) {
 		p.setQueryLog(t, "")
 	}
 
-	params := append([]string{"-test.main", "--config.file=" + p.configFile.Name(), "--web.enable-lifecycle", fmt.Sprintf("--web.listen-address=%s:%d", p.host, p.port)}, p.params()...)
+	dir := t.TempDir()
+
+	params := append([]string{
+		"-test.main",
+		"--config.file=" + p.configFile.Name(),
+		"--web.enable-lifecycle",
+		fmt.Sprintf("--web.listen-address=%s:%d", p.host, p.port),
+		"--storage.tsdb.path=" + dir,
+	}, p.params()...)
 
 	prom := exec.Command(promPath, params...)
+	reloadURL := fmt.Sprintf("http://%s:%d%s/-/reload", p.host, p.port, p.prefix)
 
 	// Log stderr in case of failure.
 	stderr, err := prom.StderrPipe()
-	testutil.Ok(t, err)
+	require.NoError(t, err)
 
 	// We use a WaitGroup to avoid calling t.Log after the test is done.
 	var wg sync.WaitGroup
 	wg.Add(1)
 	defer wg.Wait()
 	go func() {
-		slurp, _ := ioutil.ReadAll(stderr)
+		slurp, _ := io.ReadAll(stderr)
 		t.Log(string(slurp))
 		wg.Done()
 	}()
 
-	testutil.Ok(t, prom.Start())
+	require.NoError(t, prom.Start())
 
 	defer func() {
 		prom.Process.Kill()
 		prom.Wait()
 	}()
-	testutil.Ok(t, p.waitForPrometheus())
+	p.waitForPrometheus(t)
 
 	if !p.enabledAtStart {
 		p.query(t)
-		testutil.Equals(t, 0, len(readQueryLog(t, queryLogFile.Name())))
+		require.Empty(t, readQueryLog(t, queryLogFile.Name()))
 		p.setQueryLog(t, queryLogFile.Name())
-		p.reloadConfig(t)
+		reloadPrometheusConfig(t, reloadURL)
 	}
 
 	p.query(t)
 
-	ql := readQueryLog(t, queryLogFile.Name())
+	// Wait for query log entry to be written (avoid race with file I/O).
+	ql := waitForQueryLog(t, queryLogFile.Name(), 1)
 	qc := len(ql)
 	if p.exactQueryCount() {
-		testutil.Equals(t, 1, qc)
+		require.Equal(t, 1, qc)
 	} else {
-		testutil.Assert(t, qc > 0, "no queries logged")
+		require.Positive(t, qc, "no queries logged")
 	}
 	p.validateLastQuery(t, ql)
 
 	p.setQueryLog(t, "")
-	p.reloadConfig(t)
+	reloadPrometheusConfig(t, reloadURL)
 	if !p.exactQueryCount() {
 		qc = len(readQueryLog(t, queryLogFile.Name()))
 	}
@@ -299,20 +353,21 @@ func (p *queryLogTest) run(t *testing.T) {
 	p.query(t)
 
 	ql = readQueryLog(t, queryLogFile.Name())
-	testutil.Equals(t, qc, len(ql))
+	require.Len(t, ql, qc)
 
 	qc = len(ql)
 	p.setQueryLog(t, queryLogFile.Name())
-	p.reloadConfig(t)
+	reloadPrometheusConfig(t, reloadURL)
 
 	p.query(t)
 	qc++
 
-	ql = readQueryLog(t, queryLogFile.Name())
+	// Wait for query log entry to be written (avoid race with file I/O).
+	ql = waitForQueryLog(t, queryLogFile.Name(), qc)
 	if p.exactQueryCount() {
-		testutil.Equals(t, qc, len(ql))
+		require.Len(t, ql, qc)
 	} else {
-		testutil.Assert(t, len(ql) > qc, "no queries logged")
+		require.GreaterOrEqual(t, len(ql), qc, "no queries logged")
 	}
 	p.validateLastQuery(t, ql)
 	qc = len(ql)
@@ -323,14 +378,14 @@ func (p *queryLogTest) run(t *testing.T) {
 		return
 	}
 	// Move the file, Prometheus should still write to the old file.
-	newFile, err := ioutil.TempFile("", "newLoc")
-	testutil.Ok(t, err)
-	testutil.Ok(t, newFile.Close())
+	newFile, err := os.CreateTemp("", "newLoc")
+	require.NoError(t, err)
+	require.NoError(t, newFile.Close())
 	defer os.Remove(newFile.Name())
-	testutil.Ok(t, os.Rename(queryLogFile.Name(), newFile.Name()))
+	require.NoError(t, os.Rename(queryLogFile.Name(), newFile.Name()))
 	ql = readQueryLog(t, newFile.Name())
 	if p.exactQueryCount() {
-		testutil.Equals(t, qc, len(ql))
+		require.Len(t, ql, qc)
 	}
 	p.validateLastQuery(t, ql)
 	qc = len(ql)
@@ -339,24 +394,26 @@ func (p *queryLogTest) run(t *testing.T) {
 
 	qc++
 
-	ql = readQueryLog(t, newFile.Name())
+	// Wait for query log entry to be written (avoid race with file I/O).
+	ql = waitForQueryLog(t, newFile.Name(), qc)
 	if p.exactQueryCount() {
-		testutil.Equals(t, qc, len(ql))
+		require.Len(t, ql, qc)
 	} else {
-		testutil.Assert(t, len(ql) > qc, "no queries logged")
+		require.GreaterOrEqual(t, len(ql), qc, "no queries logged")
 	}
 	p.validateLastQuery(t, ql)
 
-	p.reloadConfig(t)
+	reloadPrometheusConfig(t, reloadURL)
 
 	p.query(t)
 
-	ql = readQueryLog(t, queryLogFile.Name())
+	// Wait for query log entry to be written (avoid race with file I/O).
+	ql = waitForQueryLog(t, queryLogFile.Name(), 1)
 	qc = len(ql)
 	if p.exactQueryCount() {
-		testutil.Equals(t, 1, qc)
+		require.Equal(t, 1, qc)
 	} else {
-		testutil.Assert(t, qc > 0, "no queries logged")
+		require.Positive(t, qc, "no queries logged")
 	}
 }
 
@@ -381,14 +438,27 @@ type queryLogLine struct {
 func readQueryLog(t *testing.T, path string) []queryLogLine {
 	ql := []queryLogLine{}
 	file, err := os.Open(path)
-	testutil.Ok(t, err)
+	require.NoError(t, err)
 	defer file.Close()
+
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		var q queryLogLine
-		testutil.Ok(t, json.Unmarshal(scanner.Bytes(), &q))
+		require.NoError(t, json.Unmarshal(scanner.Bytes(), &q))
 		ql = append(ql, q)
 	}
+	return ql
+}
+
+// waitForQueryLog waits for the query log to contain at least minEntries entries,
+// polling at regular intervals until the timeout is reached.
+func waitForQueryLog(t *testing.T, path string, minEntries int) []queryLogLine {
+	t.Helper()
+	var ql []queryLogLine
+	require.Eventually(t, func() bool {
+		ql = readQueryLog(t, path)
+		return len(ql) >= minEntries
+	}, 5*time.Second, 100*time.Millisecond, "timed out waiting for query log to have at least %d entries, got %d", minEntries, len(ql))
 	return ql
 }
 
@@ -396,11 +466,11 @@ func TestQueryLog(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping test in short mode.")
 	}
+	t.Parallel()
 
 	cwd, err := os.Getwd()
-	testutil.Ok(t, err)
+	require.NoError(t, err)
 
-	port := 15000
 	for _, host := range []string{"127.0.0.1", "[::1]"} {
 		for _, prefix := range []string{"", "/foobar"} {
 			for _, enabledAtStart := range []bool{true, false} {
@@ -410,11 +480,12 @@ func TestQueryLog(t *testing.T) {
 						host:           host,
 						enabledAtStart: enabledAtStart,
 						prefix:         prefix,
-						port:           port,
+						port:           testutil.RandomUnprivilegedPort(t),
 						cwd:            cwd,
 					}
 
 					t.Run(p.String(), func(t *testing.T) {
+						t.Parallel()
 						p.run(t)
 					})
 				}

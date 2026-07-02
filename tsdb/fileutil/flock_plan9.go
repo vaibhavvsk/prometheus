@@ -1,4 +1,4 @@
-// Copyright 2016 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -24,7 +24,7 @@ func (l *plan9Lock) Release() error {
 }
 
 func newLock(fileName string) (Releaser, error) {
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, os.ModeExclusive|0644)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, os.ModeExclusive|0o666)
 	if err != nil {
 		return nil, err
 	}

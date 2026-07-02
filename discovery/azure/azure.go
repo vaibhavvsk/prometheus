@@ -1,4 +1,4 @@
-// Copyright 2015 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,24 +15,35 @@ package azure
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"math/rand"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/services/compute/mgmt/2018-10-01/compute"
-	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2018-10-01/network"
-	"github.com/Azure/go-autorest/autorest"
-	"github.com/Azure/go-autorest/autorest/adal"
-	"github.com/Azure/go-autorest/autorest/azure"
-	"github.com/go-kit/kit/log"
-	"github.com/go-kit/kit/log/level"
-	"github.com/pkg/errors"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/cloud"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v5"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v4"
+	cache "github.com/Code-Hex/go-generics-cache"
+	"github.com/Code-Hex/go-generics-cache/policy/lru"
+	"github.com/prometheus/client_golang/prometheus"
 	config_util "github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
+	"github.com/prometheus/common/promslog"
+	"github.com/prometheus/common/version"
 
+	"github.com/prometheus/prometheus/discovery"
 	"github.com/prometheus/prometheus/discovery/refresh"
 	"github.com/prometheus/prometheus/discovery/targetgroup"
 	"github.com/prometheus/prometheus/util/strutil"
@@ -45,23 +56,52 @@ const (
 	azureLabelMachineID            = azureLabel + "machine_id"
 	azureLabelMachineResourceGroup = azureLabel + "machine_resource_group"
 	azureLabelMachineName          = azureLabel + "machine_name"
+	azureLabelMachineComputerName  = azureLabel + "machine_computer_name"
 	azureLabelMachineOSType        = azureLabel + "machine_os_type"
 	azureLabelMachineLocation      = azureLabel + "machine_location"
 	azureLabelMachinePrivateIP     = azureLabel + "machine_private_ip"
 	azureLabelMachinePublicIP      = azureLabel + "machine_public_ip"
 	azureLabelMachineTag           = azureLabel + "machine_tag_"
 	azureLabelMachineScaleSet      = azureLabel + "machine_scale_set"
+	azureLabelMachineSize          = azureLabel + "machine_size"
 
-	authMethodOAuth           = "OAuth"
-	authMethodManagedIdentity = "ManagedIdentity"
+	authMethodOAuth            = "OAuth"
+	authMethodSDK              = "SDK"
+	authMethodManagedIdentity  = "ManagedIdentity"
+	authMethodWorkloadIdentity = "WorkloadIdentity"
 )
 
 // DefaultSDConfig is the default Azure SD configuration.
 var DefaultSDConfig = SDConfig{
 	Port:                 80,
 	RefreshInterval:      model.Duration(5 * time.Minute),
-	Environment:          azure.PublicCloud.Name,
+	Environment:          "AzurePublicCloud",
 	AuthenticationMethod: authMethodOAuth,
+	HTTPClientConfig:     config_util.DefaultHTTPClientConfig,
+}
+
+var environments = map[string]cloud.Configuration{
+	"AZURECHINACLOUD":        cloud.AzureChina,
+	"AZURECLOUD":             cloud.AzurePublic,
+	"AZUREGERMANCLOUD":       cloud.AzurePublic,
+	"AZUREPUBLICCLOUD":       cloud.AzurePublic,
+	"AZUREUSGOVERNMENT":      cloud.AzureGovernment,
+	"AZUREUSGOVERNMENTCLOUD": cloud.AzureGovernment,
+}
+
+// CloudConfigurationFromName returns cloud configuration based on the common name specified.
+func CloudConfigurationFromName(name string) (cloud.Configuration, error) {
+	name = strings.ToUpper(name)
+	env, ok := environments[name]
+	if !ok {
+		return env, fmt.Errorf("there is no cloud configuration matching the name %q", name)
+	}
+
+	return env, nil
+}
+
+func init() {
+	discovery.RegisterConfig(&SDConfig{})
 }
 
 // SDConfig is the configuration for Azure based service discovery.
@@ -74,24 +114,39 @@ type SDConfig struct {
 	ClientSecret         config_util.Secret `yaml:"client_secret,omitempty"`
 	RefreshInterval      model.Duration     `yaml:"refresh_interval,omitempty"`
 	AuthenticationMethod string             `yaml:"authentication_method,omitempty"`
+	ResourceGroup        string             `yaml:"resource_group,omitempty"`
+
+	HTTPClientConfig config_util.HTTPClientConfig `yaml:",inline"`
+}
+
+// NewDiscovererMetrics implements discovery.Config.
+func (*SDConfig) NewDiscovererMetrics(reg prometheus.Registerer, rmi discovery.RefreshMetricsInstantiator) discovery.DiscovererMetrics {
+	return newDiscovererMetrics(reg, rmi)
+}
+
+// Name returns the name of the Config.
+func (*SDConfig) Name() string { return "azure" }
+
+// NewDiscoverer returns a Discoverer for the Config.
+func (c *SDConfig) NewDiscoverer(opts discovery.DiscovererOptions) (discovery.Discoverer, error) {
+	return NewDiscovery(c, opts)
 }
 
 func validateAuthParam(param, name string) error {
-	if len(param) == 0 {
-		return errors.Errorf("azure SD configuration requires a %s", name)
+	if param == "" {
+		return fmt.Errorf("azure SD configuration requires a %s", name)
 	}
 	return nil
 }
 
 // UnmarshalYAML implements the yaml.Unmarshaler interface.
-func (c *SDConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
+func (c *SDConfig) UnmarshalYAML(unmarshal func(any) error) error {
 	*c = DefaultSDConfig
 	type plain SDConfig
 	err := unmarshal((*plain)(c))
 	if err != nil {
 		return err
 	}
-
 	if err = validateAuthParam(c.SubscriptionID, "subscription_id"); err != nil {
 		return err
 	}
@@ -108,163 +163,316 @@ func (c *SDConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 		}
 	}
 
-	if c.AuthenticationMethod != authMethodOAuth && c.AuthenticationMethod != authMethodManagedIdentity {
-		return errors.Errorf("unknown authentication_type %q. Supported types are %q or %q", c.AuthenticationMethod, authMethodOAuth, authMethodManagedIdentity)
+	if c.AuthenticationMethod != authMethodOAuth && c.AuthenticationMethod != authMethodManagedIdentity && c.AuthenticationMethod != authMethodSDK && c.AuthenticationMethod != authMethodWorkloadIdentity {
+		return fmt.Errorf("unknown authentication_type %q. Supported types are %q, %q, %q or %q", c.AuthenticationMethod, authMethodOAuth, authMethodManagedIdentity, authMethodSDK, authMethodWorkloadIdentity)
 	}
 
-	return nil
+	return c.HTTPClientConfig.Validate()
 }
 
 type Discovery struct {
 	*refresh.Discovery
-	logger log.Logger
-	cfg    *SDConfig
-	port   int
+	logger  *slog.Logger
+	cfg     *SDConfig
+	port    int
+	cache   *cache.Cache[string, *armnetwork.Interface]
+	metrics *azureMetrics
 }
 
 // NewDiscovery returns a new AzureDiscovery which periodically refreshes its targets.
-func NewDiscovery(cfg *SDConfig, logger log.Logger) *Discovery {
-	if logger == nil {
-		logger = log.NewNopLogger()
+func NewDiscovery(cfg *SDConfig, opts discovery.DiscovererOptions) (*Discovery, error) {
+	m, ok := opts.Metrics.(*azureMetrics)
+	if !ok {
+		return nil, errors.New("invalid discovery metrics type")
 	}
+
+	if opts.Logger == nil {
+		opts.Logger = promslog.NewNopLogger()
+	}
+	l := cache.New(cache.AsLRU[string, *armnetwork.Interface](lru.WithCapacity(5000)))
 	d := &Discovery{
-		cfg:    cfg,
-		port:   cfg.Port,
-		logger: logger,
+		cfg:     cfg,
+		port:    cfg.Port,
+		logger:  opts.Logger,
+		cache:   l,
+		metrics: m,
 	}
+
 	d.Discovery = refresh.NewDiscovery(
-		logger,
-		"azure",
-		time.Duration(cfg.RefreshInterval),
-		d.refresh,
+		refresh.Options{
+			Logger:              opts.Logger,
+			Mech:                "azure",
+			SetName:             opts.SetName,
+			Interval:            time.Duration(cfg.RefreshInterval),
+			RefreshF:            d.refresh,
+			MetricsInstantiator: m.refreshMetrics,
+		},
 	)
-	return d
+
+	return d, nil
+}
+
+type client interface {
+	getVMs(ctx context.Context, resourceGroup string) ([]virtualMachine, error)
+	getScaleSets(ctx context.Context, resourceGroup string) ([]armcompute.VirtualMachineScaleSet, error)
+	getScaleSetVMs(ctx context.Context, scaleSet armcompute.VirtualMachineScaleSet) ([]virtualMachine, error)
+	getVMNetworkInterfaceByID(ctx context.Context, networkInterfaceID string) (*armnetwork.Interface, error)
+	getVMScaleSetVMNetworkInterfaceByID(ctx context.Context, networkInterfaceID, scaleSetName, instanceID string) (*armnetwork.Interface, error)
 }
 
 // azureClient represents multiple Azure Resource Manager providers.
 type azureClient struct {
-	nic    network.InterfacesClient
-	vm     compute.VirtualMachinesClient
-	vmss   compute.VirtualMachineScaleSetsClient
-	vmssvm compute.VirtualMachineScaleSetVMsClient
+	nic    interfacesClientAdapter
+	vm     virtualMachinesClientAdapter
+	vmss   virtualMachineScaleSetsClientAdapter
+	vmssvm virtualMachineScaleSetVMsClientAdapter
+	logger *slog.Logger
 }
 
-// createAzureClient is a helper function for creating an Azure compute client to ARM.
-func createAzureClient(cfg SDConfig) (azureClient, error) {
-	env, err := azure.EnvironmentFromName(cfg.Environment)
-	if err != nil {
-		return azureClient{}, err
-	}
+var _ client = &azureClient{}
 
-	activeDirectoryEndpoint := env.ActiveDirectoryEndpoint
-	resourceManagerEndpoint := env.ResourceManagerEndpoint
+// The *ClientAdapter types below capture only the operations discovery uses as
+// closures, hiding the concrete SDK clients from reflection so dead-code
+// elimination can drop the unused operations and shrink the binary.
+
+// virtualMachinesClientAdapter adapts *armcompute.VirtualMachinesClient.
+type virtualMachinesClientAdapter struct {
+	newListAllPager func(options *armcompute.VirtualMachinesClientListAllOptions) *runtime.Pager[armcompute.VirtualMachinesClientListAllResponse]
+	newListPager    func(resourceGroupName string, options *armcompute.VirtualMachinesClientListOptions) *runtime.Pager[armcompute.VirtualMachinesClientListResponse]
+}
+
+func newVirtualMachinesClientAdapter(c *armcompute.VirtualMachinesClient) virtualMachinesClientAdapter {
+	return virtualMachinesClientAdapter{
+		newListAllPager: c.NewListAllPager,
+		newListPager:    c.NewListPager,
+	}
+}
+
+// NewListAllPager lists all virtual machines in the subscription.
+func (a virtualMachinesClientAdapter) NewListAllPager(options *armcompute.VirtualMachinesClientListAllOptions) *runtime.Pager[armcompute.VirtualMachinesClientListAllResponse] {
+	return a.newListAllPager(options)
+}
+
+// NewListPager lists the virtual machines in a resource group.
+func (a virtualMachinesClientAdapter) NewListPager(resourceGroupName string, options *armcompute.VirtualMachinesClientListOptions) *runtime.Pager[armcompute.VirtualMachinesClientListResponse] {
+	return a.newListPager(resourceGroupName, options)
+}
+
+// virtualMachineScaleSetsClientAdapter adapts *armcompute.VirtualMachineScaleSetsClient.
+type virtualMachineScaleSetsClientAdapter struct {
+	newListAllPager func(options *armcompute.VirtualMachineScaleSetsClientListAllOptions) *runtime.Pager[armcompute.VirtualMachineScaleSetsClientListAllResponse]
+	newListPager    func(resourceGroupName string, options *armcompute.VirtualMachineScaleSetsClientListOptions) *runtime.Pager[armcompute.VirtualMachineScaleSetsClientListResponse]
+}
+
+func newVirtualMachineScaleSetsClientAdapter(c *armcompute.VirtualMachineScaleSetsClient) virtualMachineScaleSetsClientAdapter {
+	return virtualMachineScaleSetsClientAdapter{
+		newListAllPager: c.NewListAllPager,
+		newListPager:    c.NewListPager,
+	}
+}
+
+// NewListAllPager lists all scale sets in the subscription.
+func (a virtualMachineScaleSetsClientAdapter) NewListAllPager(options *armcompute.VirtualMachineScaleSetsClientListAllOptions) *runtime.Pager[armcompute.VirtualMachineScaleSetsClientListAllResponse] {
+	return a.newListAllPager(options)
+}
+
+// NewListPager lists the scale sets in a resource group.
+func (a virtualMachineScaleSetsClientAdapter) NewListPager(resourceGroupName string, options *armcompute.VirtualMachineScaleSetsClientListOptions) *runtime.Pager[armcompute.VirtualMachineScaleSetsClientListResponse] {
+	return a.newListPager(resourceGroupName, options)
+}
+
+// virtualMachineScaleSetVMsClientAdapter adapts *armcompute.VirtualMachineScaleSetVMsClient.
+type virtualMachineScaleSetVMsClientAdapter struct {
+	newListPager func(resourceGroupName, virtualMachineScaleSetName string, options *armcompute.VirtualMachineScaleSetVMsClientListOptions) *runtime.Pager[armcompute.VirtualMachineScaleSetVMsClientListResponse]
+}
+
+func newVirtualMachineScaleSetVMsClientAdapter(c *armcompute.VirtualMachineScaleSetVMsClient) virtualMachineScaleSetVMsClientAdapter {
+	return virtualMachineScaleSetVMsClientAdapter{
+		newListPager: c.NewListPager,
+	}
+}
+
+// NewListPager lists the virtual machines of a scale set.
+func (a virtualMachineScaleSetVMsClientAdapter) NewListPager(resourceGroupName, virtualMachineScaleSetName string, options *armcompute.VirtualMachineScaleSetVMsClientListOptions) *runtime.Pager[armcompute.VirtualMachineScaleSetVMsClientListResponse] {
+	return a.newListPager(resourceGroupName, virtualMachineScaleSetName, options)
+}
+
+// interfacesClientAdapter adapts *armnetwork.InterfacesClient.
+type interfacesClientAdapter struct {
+	get func(ctx context.Context, resourceGroupName, networkInterfaceName string, options *armnetwork.InterfacesClientGetOptions) (armnetwork.InterfacesClientGetResponse, error)
+
+	getVirtualMachineScaleSetNetworkInterface func(ctx context.Context, resourceGroupName, virtualMachineScaleSetName, virtualMachineIndex, networkInterfaceName string, options *armnetwork.InterfacesClientGetVirtualMachineScaleSetNetworkInterfaceOptions) (armnetwork.InterfacesClientGetVirtualMachineScaleSetNetworkInterfaceResponse, error)
+}
+
+func newInterfacesClientAdapter(c *armnetwork.InterfacesClient) interfacesClientAdapter {
+	return interfacesClientAdapter{
+		get: c.Get,
+		getVirtualMachineScaleSetNetworkInterface: c.GetVirtualMachineScaleSetNetworkInterface,
+	}
+}
+
+// Get retrieves a network interface.
+func (a interfacesClientAdapter) Get(ctx context.Context, resourceGroupName, networkInterfaceName string, options *armnetwork.InterfacesClientGetOptions) (armnetwork.InterfacesClientGetResponse, error) {
+	return a.get(ctx, resourceGroupName, networkInterfaceName, options)
+}
+
+// GetVirtualMachineScaleSetNetworkInterface retrieves a scale set VM network interface.
+func (a interfacesClientAdapter) GetVirtualMachineScaleSetNetworkInterface(ctx context.Context, resourceGroupName, virtualMachineScaleSetName, virtualMachineIndex, networkInterfaceName string, options *armnetwork.InterfacesClientGetVirtualMachineScaleSetNetworkInterfaceOptions) (armnetwork.InterfacesClientGetVirtualMachineScaleSetNetworkInterfaceResponse, error) {
+	return a.getVirtualMachineScaleSetNetworkInterface(ctx, resourceGroupName, virtualMachineScaleSetName, virtualMachineIndex, networkInterfaceName, options)
+}
+
+// createAzureClient is a helper method for creating an Azure compute client to ARM.
+func (d *Discovery) createAzureClient() (client, error) {
+	cloudConfiguration, err := CloudConfigurationFromName(d.cfg.Environment)
+	if err != nil {
+		return &azureClient{}, err
+	}
 
 	var c azureClient
+	c.logger = d.logger
 
-	var spt *adal.ServicePrincipalToken
-
-	switch cfg.AuthenticationMethod {
-	case authMethodManagedIdentity:
-		msiEndpoint, err := adal.GetMSIVMEndpoint()
-		if err != nil {
-			return azureClient{}, err
-		}
-
-		spt, err = adal.NewServicePrincipalTokenFromMSI(msiEndpoint, resourceManagerEndpoint)
-		if err != nil {
-			return azureClient{}, err
-		}
-	case authMethodOAuth:
-		oauthConfig, err := adal.NewOAuthConfig(activeDirectoryEndpoint, cfg.TenantID)
-		if err != nil {
-			return azureClient{}, err
-		}
-
-		spt, err = adal.NewServicePrincipalToken(*oauthConfig, cfg.ClientID, string(cfg.ClientSecret), resourceManagerEndpoint)
-		if err != nil {
-			return azureClient{}, err
-		}
+	telemetry := policy.TelemetryOptions{
+		ApplicationID: version.PrometheusUserAgent(),
 	}
 
-	bearerAuthorizer := autorest.NewBearerAuthorizer(spt)
+	credential, err := newCredential(*d.cfg, policy.ClientOptions{
+		Cloud:     cloudConfiguration,
+		Telemetry: telemetry,
+	})
+	if err != nil {
+		return &azureClient{}, err
+	}
 
-	c.vm = compute.NewVirtualMachinesClientWithBaseURI(resourceManagerEndpoint, cfg.SubscriptionID)
-	c.vm.Authorizer = bearerAuthorizer
+	client, err := config_util.NewClientFromConfig(d.cfg.HTTPClientConfig, "azure_sd")
+	if err != nil {
+		return &azureClient{}, err
+	}
+	options := &arm.ClientOptions{
+		ClientOptions: policy.ClientOptions{
+			Transport: client,
+			Cloud:     cloudConfiguration,
+			Telemetry: telemetry,
+		},
+	}
 
-	c.nic = network.NewInterfacesClientWithBaseURI(resourceManagerEndpoint, cfg.SubscriptionID)
-	c.nic.Authorizer = bearerAuthorizer
+	vmClient, err := armcompute.NewVirtualMachinesClient(d.cfg.SubscriptionID, credential, options)
+	if err != nil {
+		return &azureClient{}, err
+	}
+	c.vm = newVirtualMachinesClientAdapter(vmClient)
 
-	c.vmss = compute.NewVirtualMachineScaleSetsClientWithBaseURI(resourceManagerEndpoint, cfg.SubscriptionID)
-	c.vmss.Authorizer = bearerAuthorizer
+	nicClient, err := armnetwork.NewInterfacesClient(d.cfg.SubscriptionID, credential, options)
+	if err != nil {
+		return &azureClient{}, err
+	}
+	c.nic = newInterfacesClientAdapter(nicClient)
 
-	c.vmssvm = compute.NewVirtualMachineScaleSetVMsClientWithBaseURI(resourceManagerEndpoint, cfg.SubscriptionID)
-	c.vmssvm.Authorizer = bearerAuthorizer
+	vmssClient, err := armcompute.NewVirtualMachineScaleSetsClient(d.cfg.SubscriptionID, credential, options)
+	if err != nil {
+		return &azureClient{}, err
+	}
+	c.vmss = newVirtualMachineScaleSetsClientAdapter(vmssClient)
 
-	return c, nil
+	vmssvmClient, err := armcompute.NewVirtualMachineScaleSetVMsClient(d.cfg.SubscriptionID, credential, options)
+	if err != nil {
+		return &azureClient{}, err
+	}
+	c.vmssvm = newVirtualMachineScaleSetVMsClientAdapter(vmssvmClient)
+
+	return &c, nil
 }
 
-// azureResource represents a resource identifier in Azure.
-type azureResource struct {
-	Name          string
-	ResourceGroup string
+func newCredential(cfg SDConfig, policyClientOptions policy.ClientOptions) (azcore.TokenCredential, error) {
+	var credential azcore.TokenCredential
+	switch cfg.AuthenticationMethod {
+	case authMethodWorkloadIdentity:
+		options := &azidentity.WorkloadIdentityCredentialOptions{ClientOptions: policyClientOptions}
+		workloadIdentityCredential, err := azidentity.NewWorkloadIdentityCredential(options)
+		if err != nil {
+			return nil, err
+		}
+		credential = azcore.TokenCredential(workloadIdentityCredential)
+	case authMethodManagedIdentity:
+		options := &azidentity.ManagedIdentityCredentialOptions{ClientOptions: policyClientOptions}
+		if cfg.ClientID != "" {
+			options.ID = azidentity.ClientID(cfg.ClientID)
+		}
+		managedIdentityCredential, err := azidentity.NewManagedIdentityCredential(options)
+		if err != nil {
+			return nil, err
+		}
+		credential = azcore.TokenCredential(managedIdentityCredential)
+	case authMethodOAuth:
+		options := &azidentity.ClientSecretCredentialOptions{ClientOptions: policyClientOptions}
+		secretCredential, err := azidentity.NewClientSecretCredential(cfg.TenantID, cfg.ClientID, string(cfg.ClientSecret), options)
+		if err != nil {
+			return nil, err
+		}
+		credential = azcore.TokenCredential(secretCredential)
+	case authMethodSDK:
+		options := &azidentity.DefaultAzureCredentialOptions{ClientOptions: policyClientOptions}
+		if cfg.TenantID != "" {
+			options.TenantID = cfg.TenantID
+		}
+		sdkCredential, err := azidentity.NewDefaultAzureCredential(options)
+		if err != nil {
+			return nil, err
+		}
+		credential = azcore.TokenCredential(sdkCredential)
+	}
+	return credential, nil
 }
 
-// virtualMachine represents an Azure virtual machine (which can also be created by a VMSS)
+// virtualMachine represents an Azure virtual machine (which can also be created by a VMSS).
 type virtualMachine struct {
 	ID                string
 	Name              string
+	ComputerName      string
 	Type              string
 	Location          string
 	OsType            string
 	ScaleSet          string
+	InstanceID        string
 	Tags              map[string]*string
 	NetworkInterfaces []string
+	Size              string
 }
 
 // Create a new azureResource object from an ID string.
-func newAzureResourceFromID(id string, logger log.Logger) (azureResource, error) {
-	// Resource IDs have the following format.
-	// /subscriptions/SUBSCRIPTION_ID/resourceGroups/RESOURCE_GROUP/providers/PROVIDER/TYPE/NAME
-	// or if embedded resource then
-	// /subscriptions/SUBSCRIPTION_ID/resourceGroups/RESOURCE_GROUP/providers/PROVIDER/TYPE/NAME/TYPE/NAME
-	s := strings.Split(id, "/")
-	if len(s) != 9 && len(s) != 11 {
-		err := errors.Errorf("invalid ID '%s'. Refusing to create azureResource", id)
-		level.Error(logger).Log("err", err)
-		return azureResource{}, err
+func newAzureResourceFromID(id string, logger *slog.Logger) (*arm.ResourceID, error) {
+	if logger == nil {
+		logger = promslog.NewNopLogger()
 	}
-
-	return azureResource{
-		Name:          strings.ToLower(s[8]),
-		ResourceGroup: strings.ToLower(s[4]),
-	}, nil
+	resourceID, err := arm.ParseResourceID(id)
+	if err != nil {
+		err := fmt.Errorf("invalid ID '%s': %w", id, err)
+		logger.Error("Failed to parse resource ID", "err", err)
+		return &arm.ResourceID{}, err
+	}
+	return resourceID, nil
 }
 
-func (d *Discovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
-	defer level.Debug(d.logger).Log("msg", "Azure discovery completed")
-
-	client, err := createAzureClient(*d.cfg)
+func (d *Discovery) refreshAzureClient(ctx context.Context, client client) ([]*targetgroup.Group, error) {
+	machines, err := client.getVMs(ctx, d.cfg.ResourceGroup)
 	if err != nil {
-		return nil, errors.Wrap(err, "could not create Azure client")
+		d.metrics.failuresCount.Inc()
+		return nil, fmt.Errorf("could not get virtual machines: %w", err)
 	}
 
-	machines, err := client.getVMs(ctx)
-	if err != nil {
-		return nil, errors.Wrap(err, "could not get virtual machines")
-	}
-
-	level.Debug(d.logger).Log("msg", "Found virtual machines during Azure discovery.", "count", len(machines))
+	d.logger.Debug("Found virtual machines during Azure discovery.", "count", len(machines))
 
 	// Load the vms managed by scale sets.
-	scaleSets, err := client.getScaleSets(ctx)
+	scaleSets, err := client.getScaleSets(ctx, d.cfg.ResourceGroup)
 	if err != nil {
-		return nil, errors.Wrap(err, "could not get virtual machine scale sets")
+		d.metrics.failuresCount.Inc()
+		return nil, fmt.Errorf("could not get virtual machine scale sets: %w", err)
 	}
 
 	for _, scaleSet := range scaleSets {
 		scaleSetVms, err := client.getScaleSetVMs(ctx, scaleSet)
 		if err != nil {
-			return nil, errors.Wrap(err, "could not get virtual machine scale set vms")
+			d.metrics.failuresCount.Inc()
+			return nil, fmt.Errorf("could not get virtual machine scale set vms: %w", err)
 		}
 		machines = append(machines, scaleSetVms...)
 	}
@@ -279,81 +487,12 @@ func (d *Discovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
 	var wg sync.WaitGroup
 	wg.Add(len(machines))
 	ch := make(chan target, len(machines))
-	for i, vm := range machines {
-		go func(i int, vm virtualMachine) {
+	for _, vm := range machines {
+		go func(vm virtualMachine) {
 			defer wg.Done()
-			r, err := newAzureResourceFromID(vm.ID, d.logger)
-			if err != nil {
-				ch <- target{labelSet: nil, err: err}
-				return
-			}
-
-			labels := model.LabelSet{
-				azureLabelSubscriptionID:       model.LabelValue(d.cfg.SubscriptionID),
-				azureLabelTenantID:             model.LabelValue(d.cfg.TenantID),
-				azureLabelMachineID:            model.LabelValue(vm.ID),
-				azureLabelMachineName:          model.LabelValue(vm.Name),
-				azureLabelMachineOSType:        model.LabelValue(vm.OsType),
-				azureLabelMachineLocation:      model.LabelValue(vm.Location),
-				azureLabelMachineResourceGroup: model.LabelValue(r.ResourceGroup),
-			}
-
-			if vm.ScaleSet != "" {
-				labels[azureLabelMachineScaleSet] = model.LabelValue(vm.ScaleSet)
-			}
-
-			if vm.Tags != nil {
-				for k, v := range vm.Tags {
-					name := strutil.SanitizeLabelName(k)
-					labels[azureLabelMachineTag+model.LabelName(name)] = model.LabelValue(*v)
-				}
-			}
-
-			// Get the IP address information via separate call to the network provider.
-			for _, nicID := range vm.NetworkInterfaces {
-				networkInterface, err := client.getNetworkInterfaceByID(ctx, nicID)
-
-				if err != nil {
-					level.Error(d.logger).Log("msg", "Unable to get network interface", "name", nicID, "err", err)
-					ch <- target{labelSet: nil, err: err}
-					// Get out of this routine because we cannot continue without a network interface.
-					return
-				}
-
-				if networkInterface.InterfacePropertiesFormat == nil {
-					continue
-				}
-
-				// Unfortunately Azure does not return information on whether a VM is deallocated.
-				// This information is available via another API call however the Go SDK does not
-				// yet support this. On deallocated machines, this value happens to be nil so it
-				// is a cheap and easy way to determine if a machine is allocated or not.
-				if networkInterface.Primary == nil {
-					level.Debug(d.logger).Log("msg", "Skipping deallocated virtual machine", "machine", vm.Name)
-					return
-				}
-
-				if *networkInterface.Primary {
-					for _, ip := range *networkInterface.IPConfigurations {
-						if ip.PublicIPAddress != nil && ip.PublicIPAddress.PublicIPAddressPropertiesFormat != nil {
-							labels[azureLabelMachinePublicIP] = model.LabelValue(*ip.PublicIPAddress.IPAddress)
-						}
-						if ip.PrivateIPAddress != nil {
-							labels[azureLabelMachinePrivateIP] = model.LabelValue(*ip.PrivateIPAddress)
-							address := net.JoinHostPort(*ip.PrivateIPAddress, fmt.Sprintf("%d", d.port))
-							labels[model.AddressLabel] = model.LabelValue(address)
-							ch <- target{labelSet: labels, err: nil}
-							return
-						}
-						// If we made it here, we don't have a private IP which should be impossible.
-						// Return an empty target and error to ensure an all or nothing situation.
-						err = errors.Errorf("unable to find a private IP for VM %s", vm.Name)
-						ch <- target{labelSet: nil, err: err}
-						return
-					}
-				}
-			}
-		}(i, vm)
+			labelSet, err := d.vmToLabelSet(ctx, client, vm)
+			ch <- target{labelSet: labelSet, err: err}
+		}(vm)
 	}
 
 	wg.Wait()
@@ -362,7 +501,8 @@ func (d *Discovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
 	var tg targetgroup.Group
 	for tgt := range ch {
 		if tgt.err != nil {
-			return nil, errors.Wrap(err, "unable to complete Azure service discovery")
+			d.metrics.failuresCount.Inc()
+			return nil, fmt.Errorf("unable to complete Azure service discovery: %w", tgt.err)
 		}
 		if tgt.labelSet != nil {
 			tg.Targets = append(tg.Targets, tgt.labelSet)
@@ -372,147 +512,329 @@ func (d *Discovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
 	return []*targetgroup.Group{&tg}, nil
 }
 
-func (client *azureClient) getVMs(ctx context.Context) ([]virtualMachine, error) {
-	var vms []virtualMachine
-	result, err := client.vm.ListAll(ctx)
+func (d *Discovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
+	defer d.logger.Debug("Azure discovery completed")
+
+	client, err := d.createAzureClient()
 	if err != nil {
-		return nil, errors.Wrap(err, "could not list virtual machines")
-	}
-	for result.NotDone() {
-		for _, vm := range result.Values() {
-			vms = append(vms, mapFromVM(vm))
-		}
-		err = result.NextWithContext(ctx)
-		if err != nil {
-			return nil, errors.Wrap(err, "could not list virtual machines")
-		}
+		d.metrics.failuresCount.Inc()
+		return nil, fmt.Errorf("could not create Azure client: %w", err)
 	}
 
+	return d.refreshAzureClient(ctx, client)
+}
+
+func (d *Discovery) vmToLabelSet(ctx context.Context, client client, vm virtualMachine) (model.LabelSet, error) {
+	r, err := newAzureResourceFromID(vm.ID, d.logger)
+	if err != nil {
+		return nil, err
+	}
+
+	labels := model.LabelSet{
+		azureLabelSubscriptionID:       model.LabelValue(d.cfg.SubscriptionID),
+		azureLabelTenantID:             model.LabelValue(d.cfg.TenantID),
+		azureLabelMachineID:            model.LabelValue(vm.ID),
+		azureLabelMachineName:          model.LabelValue(vm.Name),
+		azureLabelMachineComputerName:  model.LabelValue(vm.ComputerName),
+		azureLabelMachineOSType:        model.LabelValue(vm.OsType),
+		azureLabelMachineLocation:      model.LabelValue(vm.Location),
+		azureLabelMachineResourceGroup: model.LabelValue(r.ResourceGroupName),
+		azureLabelMachineSize:          model.LabelValue(vm.Size),
+	}
+
+	if vm.ScaleSet != "" {
+		labels[azureLabelMachineScaleSet] = model.LabelValue(vm.ScaleSet)
+	}
+
+	for k, v := range vm.Tags {
+		name := strutil.SanitizeLabelName(k)
+		labels[azureLabelMachineTag+model.LabelName(name)] = model.LabelValue(*v)
+	}
+
+	// Get the IP address information via separate call to the network provider.
+	for _, nicID := range vm.NetworkInterfaces {
+		var networkInterface *armnetwork.Interface
+		if v, ok := d.getFromCache(nicID); ok {
+			networkInterface = v
+			d.metrics.cacheHitCount.Add(1)
+		} else {
+			if vm.ScaleSet == "" {
+				networkInterface, err = client.getVMNetworkInterfaceByID(ctx, nicID)
+			} else {
+				networkInterface, err = client.getVMScaleSetVMNetworkInterfaceByID(ctx, nicID, vm.ScaleSet, vm.InstanceID)
+			}
+			if err != nil {
+				if !errors.Is(err, errorNotFound) {
+					return nil, err
+				}
+				d.logger.Warn("Network interface does not exist", "name", nicID, "err", err)
+				// Get out of this routine because we cannot continue without a network interface.
+				return nil, nil
+			}
+
+			// Continue processing with the network interface
+			d.addToCache(nicID, networkInterface)
+		}
+
+		if networkInterface.Properties == nil {
+			continue
+		}
+
+		// Unfortunately Azure does not return information on whether a VM is deallocated.
+		// This information is available via another API call however the Go SDK does not
+		// yet support this. On deallocated machines, this value happens to be nil so it
+		// is a cheap and easy way to determine if a machine is allocated or not.
+		if networkInterface.Properties.Primary == nil {
+			d.logger.Debug("Skipping deallocated virtual machine", "machine", vm.Name)
+			return nil, nil
+		}
+
+		if *networkInterface.Properties.Primary {
+			for _, ip := range networkInterface.Properties.IPConfigurations {
+				// IPAddress is a field defined in PublicIPAddressPropertiesFormat,
+				// therefore we need to validate that both are not nil.
+				if ip.Properties != nil && ip.Properties.PublicIPAddress != nil && ip.Properties.PublicIPAddress.Properties != nil && ip.Properties.PublicIPAddress.Properties.IPAddress != nil {
+					labels[azureLabelMachinePublicIP] = model.LabelValue(*ip.Properties.PublicIPAddress.Properties.IPAddress)
+				}
+				if ip.Properties != nil && ip.Properties.PrivateIPAddress != nil {
+					labels[azureLabelMachinePrivateIP] = model.LabelValue(*ip.Properties.PrivateIPAddress)
+					address := net.JoinHostPort(*ip.Properties.PrivateIPAddress, strconv.Itoa(d.port))
+					labels[model.AddressLabel] = model.LabelValue(address)
+					return labels, nil
+				}
+				// If we made it here, we don't have a private IP which should be impossible.
+				// Return an empty target and error to ensure an all or nothing situation.
+				return nil, fmt.Errorf("unable to find a private IP for VM %s", vm.Name)
+			}
+		}
+	}
+	// TODO: Should we say something at this point?
+	return nil, nil
+}
+
+func (client *azureClient) getVMs(ctx context.Context, resourceGroup string) ([]virtualMachine, error) {
+	var vms []virtualMachine
+	if resourceGroup == "" {
+		pager := client.vm.NewListAllPager(nil)
+		for pager.More() {
+			nextResult, err := pager.NextPage(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("could not list virtual machines: %w", err)
+			}
+			for _, vm := range nextResult.Value {
+				vms = append(vms, mapFromVM(*vm))
+			}
+		}
+	} else {
+		pager := client.vm.NewListPager(resourceGroup, nil)
+		for pager.More() {
+			nextResult, err := pager.NextPage(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("could not list virtual machines: %w", err)
+			}
+			for _, vm := range nextResult.Value {
+				vms = append(vms, mapFromVM(*vm))
+			}
+		}
+	}
 	return vms, nil
 }
 
-func (client *azureClient) getScaleSets(ctx context.Context) ([]compute.VirtualMachineScaleSet, error) {
-	var scaleSets []compute.VirtualMachineScaleSet
-	result, err := client.vmss.ListAll(ctx)
-	if err != nil {
-		return nil, errors.Wrap(err, "could not list virtual machine scale sets")
-	}
-	for result.NotDone() {
-		scaleSets = append(scaleSets, result.Values()...)
-		err = result.NextWithContext(ctx)
-		if err != nil {
-			return nil, errors.Wrap(err, "could not list virtual machine scale sets")
+func (client *azureClient) getScaleSets(ctx context.Context, resourceGroup string) ([]armcompute.VirtualMachineScaleSet, error) {
+	var scaleSets []armcompute.VirtualMachineScaleSet
+	if resourceGroup == "" {
+		pager := client.vmss.NewListAllPager(nil)
+		for pager.More() {
+			nextResult, err := pager.NextPage(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("could not list virtual machine scale sets: %w", err)
+			}
+			for _, vmss := range nextResult.Value {
+				scaleSets = append(scaleSets, *vmss)
+			}
+		}
+	} else {
+		pager := client.vmss.NewListPager(resourceGroup, nil)
+		for pager.More() {
+			nextResult, err := pager.NextPage(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("could not list virtual machine scale sets: %w", err)
+			}
+			for _, vmss := range nextResult.Value {
+				scaleSets = append(scaleSets, *vmss)
+			}
 		}
 	}
-
 	return scaleSets, nil
 }
 
-func (client *azureClient) getScaleSetVMs(ctx context.Context, scaleSet compute.VirtualMachineScaleSet) ([]virtualMachine, error) {
+func (client *azureClient) getScaleSetVMs(ctx context.Context, scaleSet armcompute.VirtualMachineScaleSet) ([]virtualMachine, error) {
 	var vms []virtualMachine
-	//TODO do we really need to fetch the resourcegroup this way?
-	r, err := newAzureResourceFromID(*scaleSet.ID, nil)
-
+	// TODO do we really need to fetch the resourcegroup this way?
+	r, err := newAzureResourceFromID(*scaleSet.ID, client.logger)
 	if err != nil {
-		return nil, errors.Wrap(err, "could not parse scale set ID")
+		return nil, fmt.Errorf("could not parse scale set ID: %w", err)
 	}
 
-	result, err := client.vmssvm.List(ctx, r.ResourceGroup, *(scaleSet.Name), "", "", "")
-	if err != nil {
-		return nil, errors.Wrap(err, "could not list virtual machine scale set vms")
-	}
-	for result.NotDone() {
-		for _, vm := range result.Values() {
-			vms = append(vms, mapFromVMScaleSetVM(vm, *scaleSet.Name))
-		}
-		err = result.NextWithContext(ctx)
+	pager := client.vmssvm.NewListPager(r.ResourceGroupName, *(scaleSet.Name), nil)
+	for pager.More() {
+		nextResult, err := pager.NextPage(ctx)
 		if err != nil {
-			return nil, errors.Wrap(err, "could not list virtual machine scale set vms")
+			return nil, fmt.Errorf("could not list virtual machine scale set vms: %w", err)
+		}
+		for _, vmssvm := range nextResult.Value {
+			vms = append(vms, mapFromVMScaleSetVM(*vmssvm, *scaleSet.Name))
 		}
 	}
 
 	return vms, nil
 }
 
-func mapFromVM(vm compute.VirtualMachine) virtualMachine {
-	osType := string(vm.StorageProfile.OsDisk.OsType)
+func mapFromVM(vm armcompute.VirtualMachine) virtualMachine {
+	var osType string
 	tags := map[string]*string{}
 	networkInterfaces := []string{}
+	var computerName string
+	var size string
 
 	if vm.Tags != nil {
 		tags = vm.Tags
 	}
 
-	if vm.NetworkProfile != nil {
-		for _, vmNIC := range *(vm.NetworkProfile.NetworkInterfaces) {
-			networkInterfaces = append(networkInterfaces, *vmNIC.ID)
+	if vm.Properties != nil {
+		if vm.Properties.StorageProfile != nil &&
+			vm.Properties.StorageProfile.OSDisk != nil &&
+			vm.Properties.StorageProfile.OSDisk.OSType != nil {
+			osType = string(*vm.Properties.StorageProfile.OSDisk.OSType)
+		}
+
+		if vm.Properties.NetworkProfile != nil {
+			for _, vmNIC := range vm.Properties.NetworkProfile.NetworkInterfaces {
+				networkInterfaces = append(networkInterfaces, *vmNIC.ID)
+			}
+		}
+		if vm.Properties.OSProfile != nil && vm.Properties.OSProfile.ComputerName != nil {
+			computerName = *(vm.Properties.OSProfile.ComputerName)
+		}
+		if vm.Properties.HardwareProfile != nil {
+			size = string(*vm.Properties.HardwareProfile.VMSize)
 		}
 	}
 
 	return virtualMachine{
 		ID:                *(vm.ID),
 		Name:              *(vm.Name),
+		ComputerName:      computerName,
 		Type:              *(vm.Type),
 		Location:          *(vm.Location),
 		OsType:            osType,
 		ScaleSet:          "",
 		Tags:              tags,
 		NetworkInterfaces: networkInterfaces,
+		Size:              size,
 	}
 }
 
-func mapFromVMScaleSetVM(vm compute.VirtualMachineScaleSetVM, scaleSetName string) virtualMachine {
-	osType := string(vm.StorageProfile.OsDisk.OsType)
+func mapFromVMScaleSetVM(vm armcompute.VirtualMachineScaleSetVM, scaleSetName string) virtualMachine {
+	var osType string
 	tags := map[string]*string{}
 	networkInterfaces := []string{}
+	var computerName string
+	var size string
 
 	if vm.Tags != nil {
 		tags = vm.Tags
 	}
 
-	if vm.NetworkProfile != nil {
-		for _, vmNIC := range *(vm.NetworkProfile.NetworkInterfaces) {
-			networkInterfaces = append(networkInterfaces, *vmNIC.ID)
+	if vm.Properties != nil {
+		if vm.Properties.StorageProfile != nil &&
+			vm.Properties.StorageProfile.OSDisk != nil &&
+			vm.Properties.StorageProfile.OSDisk.OSType != nil {
+			osType = string(*vm.Properties.StorageProfile.OSDisk.OSType)
+		}
+
+		if vm.Properties.NetworkProfile != nil {
+			for _, vmNIC := range vm.Properties.NetworkProfile.NetworkInterfaces {
+				networkInterfaces = append(networkInterfaces, *vmNIC.ID)
+			}
+		}
+		if vm.Properties.OSProfile != nil && vm.Properties.OSProfile.ComputerName != nil {
+			computerName = *(vm.Properties.OSProfile.ComputerName)
+		}
+		if vm.Properties.HardwareProfile != nil {
+			size = string(*vm.Properties.HardwareProfile.VMSize)
 		}
 	}
 
 	return virtualMachine{
 		ID:                *(vm.ID),
 		Name:              *(vm.Name),
+		ComputerName:      computerName,
 		Type:              *(vm.Type),
 		Location:          *(vm.Location),
 		OsType:            osType,
 		ScaleSet:          scaleSetName,
+		InstanceID:        *(vm.InstanceID),
 		Tags:              tags,
 		NetworkInterfaces: networkInterfaces,
+		Size:              size,
 	}
 }
 
-func (client *azureClient) getNetworkInterfaceByID(ctx context.Context, networkInterfaceID string) (*network.Interface, error) {
-	result := network.Interface{}
-	queryParameters := map[string]interface{}{
-		"api-version": "2018-10-01",
-	}
+var errorNotFound = errors.New("network interface does not exist")
 
-	preparer := autorest.CreatePreparer(
-		autorest.AsGet(),
-		autorest.WithBaseURL(client.nic.BaseURI),
-		autorest.WithPath(networkInterfaceID),
-		autorest.WithQueryParameters(queryParameters))
-	req, err := preparer.Prepare((&http.Request{}).WithContext(ctx))
+// getVMNetworkInterfaceByID gets the network interface.
+// If a 404 is returned from the Azure API, `errorNotFound` is returned.
+func (client *azureClient) getVMNetworkInterfaceByID(ctx context.Context, networkInterfaceID string) (*armnetwork.Interface, error) {
+	r, err := newAzureResourceFromID(networkInterfaceID, client.logger)
 	if err != nil {
-		return nil, autorest.NewErrorWithError(err, "network.InterfacesClient", "Get", nil, "Failure preparing request")
+		return nil, fmt.Errorf("could not parse network interface ID: %w", err)
 	}
 
-	resp, err := client.nic.GetSender(req)
+	resp, err := client.nic.Get(ctx, r.ResourceGroupName, r.Name, &armnetwork.InterfacesClientGetOptions{Expand: to.Ptr("IPConfigurations/PublicIPAddress")})
 	if err != nil {
-		return nil, autorest.NewErrorWithError(err, "network.InterfacesClient", "Get", resp, "Failure sending request")
+		var responseError *azcore.ResponseError
+		if errors.As(err, &responseError) && responseError.StatusCode == http.StatusNotFound {
+			return nil, errorNotFound
+		}
+		return nil, fmt.Errorf("failed to retrieve Interface %v with error: %w", networkInterfaceID, err)
 	}
 
-	result, err = client.nic.GetResponder(resp)
+	return &resp.Interface, nil
+}
+
+// getVMScaleSetVMNetworkInterfaceByID gets the network interface.
+// If a 404 is returned from the Azure API, `errorNotFound` is returned.
+func (client *azureClient) getVMScaleSetVMNetworkInterfaceByID(ctx context.Context, networkInterfaceID, scaleSetName, instanceID string) (*armnetwork.Interface, error) {
+	r, err := newAzureResourceFromID(networkInterfaceID, client.logger)
 	if err != nil {
-		return nil, autorest.NewErrorWithError(err, "network.InterfacesClient", "Get", resp, "Failure responding to request")
+		return nil, fmt.Errorf("could not parse network interface ID: %w", err)
 	}
 
-	return &result, nil
+	resp, err := client.nic.GetVirtualMachineScaleSetNetworkInterface(ctx, r.ResourceGroupName, scaleSetName, instanceID, r.Name, &armnetwork.InterfacesClientGetVirtualMachineScaleSetNetworkInterfaceOptions{Expand: to.Ptr("IPConfigurations/PublicIPAddress")})
+	if err != nil {
+		var responseError *azcore.ResponseError
+		if errors.As(err, &responseError) && responseError.StatusCode == http.StatusNotFound {
+			return nil, errorNotFound
+		}
+		return nil, fmt.Errorf("failed to retrieve Interface %v with error: %w", networkInterfaceID, err)
+	}
+
+	return &resp.Interface, nil
+}
+
+// addToCache will add the network interface information for the specified nicID.
+func (d *Discovery) addToCache(nicID string, netInt *armnetwork.Interface) {
+	random := rand.Int63n(int64(time.Duration(d.cfg.RefreshInterval * 3).Seconds()))
+	rs := time.Duration(random) * time.Second
+	exptime := time.Duration(d.cfg.RefreshInterval*10) + rs
+	d.cache.Set(nicID, netInt, cache.WithExpiration(exptime))
+	d.logger.Debug("Adding nic", "nic", nicID, "time", exptime.Seconds())
+}
+
+// getFromCache will get the network Interface for the specified nicID
+// If the cache is disabled nothing will happen.
+func (d *Discovery) getFromCache(nicID string) (*armnetwork.Interface, bool) {
+	net, found := d.cache.Get(nicID)
+	return net, found
 }

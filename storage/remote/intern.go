@@ -1,4 +1,4 @@
-// Copyright 2019 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -20,13 +20,12 @@ package remote
 
 import (
 	"sync"
-	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"go.uber.org/atomic"
 )
 
-var interner = newPool()
 var noReferenceReleases = promauto.NewCounter(prometheus.CounterOpts{
 	Namespace: namespace,
 	Subsystem: subsystem,
@@ -40,11 +39,13 @@ type pool struct {
 }
 
 type entry struct {
-	// Keep all 64bit atomically accessed variables at the top of this struct.
-	// See https://golang.org/pkg/sync/atomic/#pkg-note-BUG for more info.
-	refs int64
+	refs atomic.Int64
 
 	s string
+}
+
+func newEntry(s string) *entry {
+	return &entry{s: s}
 }
 
 func newPool() *pool {
@@ -60,22 +61,24 @@ func (p *pool) intern(s string) string {
 
 	p.mtx.RLock()
 	interned, ok := p.pool[s]
-	p.mtx.RUnlock()
 	if ok {
-		atomic.AddInt64(&interned.refs, 1)
+		// Increase the reference count while we're still holding the read lock,
+		// This will prevent the release() from deleting the entry while we're increasing its ref count.
+		interned.refs.Inc()
+		p.mtx.RUnlock()
 		return interned.s
 	}
+	p.mtx.RUnlock()
+
 	p.mtx.Lock()
 	defer p.mtx.Unlock()
 	if interned, ok := p.pool[s]; ok {
-		atomic.AddInt64(&interned.refs, 1)
+		interned.refs.Inc()
 		return interned.s
 	}
 
-	p.pool[s] = &entry{
-		s:    s,
-		refs: 1,
-	}
+	p.pool[s] = newEntry(s)
+	p.pool[s].refs.Store(1)
 	return s
 }
 
@@ -89,14 +92,14 @@ func (p *pool) release(s string) {
 		return
 	}
 
-	refs := atomic.AddInt64(&interned.refs, -1)
+	refs := interned.refs.Dec()
 	if refs > 0 {
 		return
 	}
 
 	p.mtx.Lock()
 	defer p.mtx.Unlock()
-	if atomic.LoadInt64(&interned.refs) != 0 {
+	if interned.refs.Load() != 0 {
 		return
 	}
 	delete(p.pool, s)

@@ -1,4 +1,4 @@
-// Copyright 2015 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -14,22 +14,27 @@
 package web
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
+	"strings"
 
-	"github.com/go-kit/kit/log/level"
 	"github.com/gogo/protobuf/proto"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
 
-	"github.com/prometheus/prometheus/pkg/labels"
-	"github.com/prometheus/prometheus/pkg/timestamp"
-	"github.com/prometheus/prometheus/pkg/value"
+	"github.com/prometheus/prometheus/model/histogram"
+	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/model/timestamp"
+	"github.com/prometheus/prometheus/model/value"
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/storage"
+	"github.com/prometheus/prometheus/tsdb"
+	"github.com/prometheus/prometheus/tsdb/chunkenc"
 )
 
 var (
@@ -43,36 +48,42 @@ var (
 	})
 )
 
+func registerFederationMetrics(r prometheus.Registerer) {
+	r.MustRegister(federationWarnings, federationErrors)
+}
+
 func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 	h.mtx.RLock()
 	defer h.mtx.RUnlock()
+
+	ctx := req.Context()
 
 	if err := req.ParseForm(); err != nil {
 		http.Error(w, fmt.Sprintf("error parsing form values: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	var matcherSets [][]*labels.Matcher
-	for _, s := range req.Form["match[]"] {
-		matchers, err := promql.ParseMetricSelector(s)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		matcherSets = append(matcherSets, matchers)
+	matcherSets, err := h.options.Parser.ParseMetricSelectors(req.Form["match[]"])
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
 	var (
-		mint   = timestamp.FromTime(h.now().Time().Add(-promql.LookbackDelta))
+		mint   = timestamp.FromTime(h.now().Time().Add(-h.lookbackDelta))
 		maxt   = timestamp.FromTime(h.now().Time())
 		format = expfmt.Negotiate(req.Header)
 		enc    = expfmt.NewEncoder(w, format)
 	)
 	w.Header().Set("Content-Type", string(format))
 
-	q, err := h.storage.Querier(req.Context(), mint, maxt)
+	q, err := h.localStorage.Querier(mint, maxt)
 	if err != nil {
 		federationErrors.Inc()
+		if errors.Is(err, tsdb.ErrNotReady) {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -80,59 +91,72 @@ func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 
 	vec := make(promql.Vector, 0, 8000)
 
-	params := &storage.SelectParams{
-		Start: mint,
-		End:   maxt,
-	}
+	hints := &storage.SelectHints{Start: mint, End: maxt}
 
 	var sets []storage.SeriesSet
 	for _, mset := range matcherSets {
-		s, wrns, err := q.Select(params, mset...)
-		if wrns != nil {
-			level.Debug(h.logger).Log("msg", "federation select returned warnings", "warnings", wrns)
-			federationWarnings.Add(float64(len(wrns)))
-		}
-		if err != nil {
-			federationErrors.Inc()
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		s := q.Select(ctx, true, hints, mset...)
 		sets = append(sets, s)
 	}
 
-	set := storage.NewMergeSeriesSet(sets, nil)
-	it := storage.NewBuffer(int64(promql.LookbackDelta / 1e6))
+	set := storage.NewMergeSeriesSet(sets, 0, storage.ChainedSeriesMerge)
+	it := storage.NewBuffer(int64(h.lookbackDelta / 1e6))
+	var chkIter chunkenc.Iterator
+Loop:
 	for set.Next() {
 		s := set.At()
 
 		// TODO(fabxc): allow fast path for most recent sample either
 		// in the storage itself or caching layer in Prometheus.
-		it.Reset(s.Iterator())
+		chkIter = s.Iterator(chkIter)
+		it.Reset(chkIter)
 
-		var t int64
-		var v float64
-
-		ok := it.Seek(maxt)
-		if ok {
-			t, v = it.Values()
-		} else {
-			t, v, ok = it.PeekBack(1)
+		var (
+			t  int64
+			f  float64
+			fh *histogram.FloatHistogram
+		)
+		valueType := it.Seek(maxt)
+		switch valueType {
+		case chunkenc.ValFloat:
+			t, f = it.At()
+		case chunkenc.ValFloatHistogram, chunkenc.ValHistogram:
+			t, fh = it.AtFloatHistogram(nil)
+		default:
+			sample, ok := it.PeekBack(1)
 			if !ok {
-				continue
+				continue Loop
+			}
+			t = sample.T()
+			switch sample.Type() {
+			case chunkenc.ValFloat:
+				f = sample.F()
+			case chunkenc.ValHistogram:
+				fh = sample.H().ToFloat(nil)
+			case chunkenc.ValFloatHistogram:
+				fh = sample.FH()
+			default:
+				continue Loop
 			}
 		}
 		// The exposition formats do not support stale markers, so drop them. This
 		// is good enough for staleness handling of federated data, as the
 		// interval-based limits on staleness will do the right thing for supported
 		// use cases (which is to say federating aggregated time series).
-		if value.IsStaleNaN(v) {
+		if value.IsStaleNaN(f) || (fh != nil && value.IsStaleNaN(fh.Sum)) {
 			continue
 		}
 
 		vec = append(vec, promql.Sample{
 			Metric: s.Labels(),
-			Point:  promql.Point{T: t, V: v},
+			T:      t,
+			F:      f,
+			H:      fh,
 		})
+	}
+	if ws := set.Warnings(); len(ws) > 0 {
+		h.logger.Debug("Federation select returned warnings", "warnings", ws)
+		federationWarnings.Add(float64(len(ws)))
 	}
 	if set.Err() != nil {
 		federationErrors.Inc()
@@ -140,7 +164,11 @@ func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	sort.Sort(byName(vec))
+	slices.SortFunc(vec, func(a, b promql.Sample) int {
+		ni := a.Metric.Get(labels.MetricName)
+		nj := b.Metric.Get(labels.MetricName)
+		return strings.Compare(ni, nj)
+	})
 
 	externalLabels := h.config.GlobalConfig.ExternalLabels.Map()
 	if _, ok := externalLabels[model.InstanceLabel]; !ok {
@@ -153,44 +181,79 @@ func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 	sort.Strings(externalLabelNames)
 
 	var (
-		lastMetricName string
-		protMetricFam  *dto.MetricFamily
+		lastMetricName                          string
+		lastWasHistogram, lastHistogramWasGauge bool
+		protMetricFam                           *dto.MetricFamily
 	)
 	for _, s := range vec {
-		nameSeen := false
-		globalUsed := map[string]struct{}{}
-		protMetric := &dto.Metric{
-			Untyped: &dto.Untyped{},
+		isHistogram := s.H != nil
+		formatType := format.FormatType()
+		if isHistogram &&
+			!s.H.UsesCustomBuckets() &&
+			formatType != expfmt.TypeProtoDelim &&
+			formatType != expfmt.TypeProtoText &&
+			formatType != expfmt.TypeProtoCompact {
+			// Can't serve a native histogram with a non-protobuf format.
+			// (We can serve an NHCB, though, as it is converted to a
+			// classic histogram for federation.)
+			// TODO(codesome): Serve them when other protocols get the native histogram support.
+			continue
 		}
 
-		for _, l := range s.Metric {
+		nameSeen := false
+		globalUsed := map[string]struct{}{}
+		protMetric := &dto.Metric{}
+
+		err := s.Metric.Validate(func(l labels.Label) error {
 			if l.Value == "" {
 				// No value means unset. Never consider those labels.
 				// This is also important to protect against nameless metrics.
-				continue
+				return nil
 			}
 			if l.Name == labels.MetricName {
 				nameSeen = true
-				if l.Value == lastMetricName {
-					// We already have the name in the current MetricFamily,
-					// and we ignore nameless metrics.
-					continue
+				// We already have the name in the current MetricDescriptor,
+				// and we ignore nameless metrics.
+				if l.Value == lastMetricName &&
+					// The sample type matches (float vs histogram).
+					lastWasHistogram == isHistogram &&
+					// If it was a histogram, the histogram type
+					// (counter vs gauge) also matches.
+					(!isHistogram ||
+						lastHistogramWasGauge == (s.H.CounterResetHint == histogram.GaugeType)) {
+					return nil
 				}
-				// Need to start a new MetricFamily. Ship off the old one (if any) before
-				// creating the new one.
+
+				// Since we now check for the sample type and
+				// type of histogram above, we will end up
+				// creating multiple metric families for the
+				// same metric name. This would technically be
+				// an invalid exposition. But since the consumer
+				// of this is Prometheus, and Prometheus can
+				// parse it fine, we allow it and bend the rules
+				// to make federation possible in those cases.
+
+				// Need to start a new MetricDescriptor. Ship
+				// off the old one (if any) before creating the
+				// new one.
 				if protMetricFam != nil {
 					if err := enc.Encode(protMetricFam); err != nil {
-						federationErrors.Inc()
-						level.Error(h.logger).Log("msg", "federation failed", "err", err)
-						return
+						return err
 					}
 				}
 				protMetricFam = &dto.MetricFamily{
 					Type: dto.MetricType_UNTYPED.Enum(),
 					Name: proto.String(l.Value),
 				}
+				if isHistogram {
+					if s.H.CounterResetHint == histogram.GaugeType {
+						protMetricFam.Type = dto.MetricType_GAUGE_HISTOGRAM.Enum()
+					} else {
+						protMetricFam.Type = dto.MetricType_HISTOGRAM.Enum()
+					}
+				}
 				lastMetricName = l.Value
-				continue
+				return nil
 			}
 			protMetric.Label = append(protMetric.Label, &dto.LabelPair{
 				Name:  proto.String(l.Name),
@@ -199,44 +262,115 @@ func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 			if _, ok := externalLabels[l.Name]; ok {
 				globalUsed[l.Name] = struct{}{}
 			}
+			return nil
+		})
+		if err != nil {
+			federationErrors.Inc()
+			h.logger.Error("federation failed", "err", err)
+			return
 		}
 		if !nameSeen {
-			level.Warn(h.logger).Log("msg", "Ignoring nameless metric during federation", "metric", s.Metric)
+			h.logger.Warn("Ignoring nameless metric during federation", "metric", s.Metric)
 			continue
 		}
 		// Attach global labels if they do not exist yet.
 		for _, ln := range externalLabelNames {
 			lv := externalLabels[ln]
-			if _, ok := globalUsed[string(ln)]; !ok {
+			if _, ok := globalUsed[ln]; !ok {
 				protMetric.Label = append(protMetric.Label, &dto.LabelPair{
-					Name:  proto.String(string(ln)),
-					Value: proto.String(string(lv)),
+					Name:  proto.String(ln),
+					Value: proto.String(lv),
 				})
 			}
 		}
 
 		protMetric.TimestampMs = proto.Int64(s.T)
-		protMetric.Untyped.Value = proto.Float64(s.V)
-
+		if !isHistogram {
+			lastHistogramWasGauge = false
+			protMetric.Untyped = &dto.Untyped{
+				Value: proto.Float64(s.F),
+			}
+		} else {
+			lastHistogramWasGauge = s.H.CounterResetHint == histogram.GaugeType
+			if s.H.UsesCustomBuckets() {
+				protMetric.Histogram = makeClassicHistogram(s.H)
+			} else {
+				protMetric.Histogram = makeNativeHistogram(s.H)
+			}
+		}
+		lastWasHistogram = isHistogram
 		protMetricFam.Metric = append(protMetricFam.Metric, protMetric)
 	}
-	// Still have to ship off the last MetricFamily, if any.
+	// Still have to ship off the last MetricDescriptor, if any.
 	if protMetricFam != nil {
 		if err := enc.Encode(protMetricFam); err != nil {
 			federationErrors.Inc()
-			level.Error(h.logger).Log("msg", "federation failed", "err", err)
+			h.logger.Error("federation failed", "err", err)
 		}
 	}
 }
 
-// byName makes a model.Vector sortable by metric name.
-type byName promql.Vector
+// makeNativeHistogram creates a dto.Histogram representing a native histogram.
+// Use only for standard exponential schemas.
+func makeNativeHistogram(h *histogram.FloatHistogram) *dto.Histogram {
+	result := &dto.Histogram{
+		SampleCountFloat: proto.Float64(h.Count),
+		SampleSum:        proto.Float64(h.Sum),
+		Schema:           proto.Int32(h.Schema),
+		ZeroThreshold:    proto.Float64(h.ZeroThreshold),
+		ZeroCountFloat:   proto.Float64(h.ZeroCount),
+		NegativeCount:    h.NegativeBuckets,
+		PositiveCount:    h.PositiveBuckets,
+	}
+	if len(h.PositiveSpans) > 0 {
+		result.PositiveSpan = make([]*dto.BucketSpan, len(h.PositiveSpans))
+		for i, sp := range h.PositiveSpans {
+			result.PositiveSpan[i] = &dto.BucketSpan{
+				Offset: proto.Int32(sp.Offset),
+				Length: proto.Uint32(sp.Length),
+			}
+		}
+	}
+	if len(h.NegativeSpans) > 0 {
+		result.NegativeSpan = make([]*dto.BucketSpan, len(h.NegativeSpans))
+		for i, sp := range h.NegativeSpans {
+			result.NegativeSpan[i] = &dto.BucketSpan{
+				Offset: proto.Int32(sp.Offset),
+				Length: proto.Uint32(sp.Length),
+			}
+		}
+	}
+	return result
+}
 
-func (vec byName) Len() int      { return len(vec) }
-func (vec byName) Swap(i, j int) { vec[i], vec[j] = vec[j], vec[i] }
-
-func (vec byName) Less(i, j int) bool {
-	ni := vec[i].Metric.Get(labels.MetricName)
-	nj := vec[j].Metric.Get(labels.MetricName)
-	return ni < nj
+// makeClassicHistogram creates a dto.Histogram representing a classic
+// histogram. Use only for NHCB (schema -53).
+func makeClassicHistogram(h *histogram.FloatHistogram) *dto.Histogram {
+	result := &dto.Histogram{
+		SampleCountFloat: proto.Float64(h.Count),
+		SampleSum:        proto.Float64(h.Sum),
+	}
+	result.Bucket = make([]*dto.Bucket, len(h.CustomValues))
+	var (
+		cumulativeCount float64
+		bucketIter      = h.PositiveBucketIterator()
+		bucketAvailable = bucketIter.Next()
+	)
+	for i, le := range h.CustomValues {
+		for bucketAvailable && int(bucketIter.At().Index) < i {
+			bucketAvailable = bucketIter.Next()
+		}
+		if bucketAvailable && int(bucketIter.At().Index) == i {
+			cumulativeCount += bucketIter.At().Count
+		}
+		result.Bucket[i] = &dto.Bucket{
+			UpperBound:           proto.Float64(le),
+			CumulativeCountFloat: proto.Float64(cumulativeCount),
+		}
+	}
+	// Note that we do not add the +Inf bucket explicitly. In the protobuf
+	// exposition format, it is optional. For other exposition formats, the
+	// code converting the protobuf created here into the actual exposition
+	// payload will add the +Inf bucket.
+	return result
 }

@@ -1,4 +1,4 @@
-// Copyright 2019 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -14,75 +14,179 @@
 package remote
 
 import (
-	"io/ioutil"
+	"fmt"
 	"net/url"
-	"os"
+	"sync"
 	"testing"
 
-	"github.com/prometheus/client_golang/prometheus"
 	common_config "github.com/prometheus/common/config"
+	"github.com/stretchr/testify/require"
+
 	"github.com/prometheus/prometheus/config"
-	"github.com/prometheus/prometheus/util/testutil"
+	"github.com/prometheus/prometheus/model/labels"
 )
 
 func TestStorageLifecycle(t *testing.T) {
-	dir, err := ioutil.TempDir("", "TestStorageLifecycle")
-	testutil.Ok(t, err)
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
-	s := NewStorage(nil, prometheus.DefaultRegisterer, nil, dir, defaultFlushDeadline)
+	s := NewStorage(nil, nil, nil, dir, defaultFlushDeadline, nil, false)
 	conf := &config.Config{
 		GlobalConfig: config.DefaultGlobalConfig,
 		RemoteWriteConfigs: []*config.RemoteWriteConfig{
-			&config.DefaultRemoteWriteConfig,
+			// We need to set URL's so that metric creation doesn't panic.
+			baseRemoteWriteConfig("http://test-storage.com"),
 		},
 		RemoteReadConfigs: []*config.RemoteReadConfig{
-			&config.DefaultRemoteReadConfig,
-		},
-	}
-	// We need to set URL's so that metric creation doesn't panic.
-	conf.RemoteWriteConfigs[0].URL = &common_config.URL{
-		URL: &url.URL{
-			Host: "http://test-storage.com",
-		},
-	}
-	conf.RemoteReadConfigs[0].URL = &common_config.URL{
-		URL: &url.URL{
-			Host: "http://test-storage.com",
+			baseRemoteReadConfig("http://test-storage.com"),
 		},
 	}
 
-	s.ApplyConfig(conf)
+	require.NoError(t, s.ApplyConfig(conf))
 
 	// make sure remote write has a queue.
-	testutil.Equals(t, 1, len(s.rws.queues))
+	require.Len(t, s.rws.queues, 1)
 
 	// make sure remote write has a queue.
-	testutil.Equals(t, 1, len(s.queryables))
+	require.Len(t, s.queryables, 1)
 
-	err = s.Close()
-	testutil.Ok(t, err)
+	err := s.Close()
+	require.NoError(t, err)
 }
 
 func TestUpdateRemoteReadConfigs(t *testing.T) {
-	dir, err := ioutil.TempDir("", "TestUpdateRemoteReadConfigs")
-	testutil.Ok(t, err)
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
-	s := NewStorage(nil, prometheus.DefaultRegisterer, nil, dir, defaultFlushDeadline)
+	s := NewStorage(nil, nil, nil, dir, defaultFlushDeadline, nil, false)
 
 	conf := &config.Config{
 		GlobalConfig: config.GlobalConfig{},
 	}
-	s.ApplyConfig(conf)
-	testutil.Equals(t, 0, len(s.queryables))
+	require.NoError(t, s.ApplyConfig(conf))
+	require.Empty(t, s.queryables)
 
 	conf.RemoteReadConfigs = []*config.RemoteReadConfig{
-		&config.DefaultRemoteReadConfig,
+		baseRemoteReadConfig("http://test-storage.com"),
 	}
-	s.ApplyConfig(conf)
-	testutil.Equals(t, 1, len(s.queryables))
+	require.NoError(t, s.ApplyConfig(conf))
+	require.Len(t, s.queryables, 1)
 
-	err = s.Close()
-	testutil.Ok(t, err)
+	err := s.Close()
+	require.NoError(t, err)
+}
+
+func TestFilterExternalLabels(t *testing.T) {
+	dir := t.TempDir()
+
+	s := NewStorage(nil, nil, nil, dir, defaultFlushDeadline, nil, false)
+
+	conf := &config.Config{
+		GlobalConfig: config.GlobalConfig{
+			ExternalLabels: labels.FromStrings("foo", "bar"),
+		},
+	}
+	require.NoError(t, s.ApplyConfig(conf))
+	require.Empty(t, s.queryables)
+
+	conf.RemoteReadConfigs = []*config.RemoteReadConfig{
+		baseRemoteReadConfig("http://test-storage.com"),
+	}
+
+	require.NoError(t, s.ApplyConfig(conf))
+	require.Len(t, s.queryables, 1)
+	require.Equal(t, 1, s.queryables[0].(*sampleAndChunkQueryableClient).externalLabels.Len())
+
+	err := s.Close()
+	require.NoError(t, err)
+}
+
+func TestIgnoreExternalLabels(t *testing.T) {
+	dir := t.TempDir()
+
+	s := NewStorage(nil, nil, nil, dir, defaultFlushDeadline, nil, false)
+
+	conf := &config.Config{
+		GlobalConfig: config.GlobalConfig{
+			ExternalLabels: labels.FromStrings("foo", "bar"),
+		},
+	}
+	require.NoError(t, s.ApplyConfig(conf))
+	require.Empty(t, s.queryables)
+
+	conf.RemoteReadConfigs = []*config.RemoteReadConfig{
+		baseRemoteReadConfig("http://test-storage.com"),
+	}
+
+	conf.RemoteReadConfigs[0].FilterExternalLabels = false
+
+	require.NoError(t, s.ApplyConfig(conf))
+	require.Len(t, s.queryables, 1)
+	require.Equal(t, 0, s.queryables[0].(*sampleAndChunkQueryableClient).externalLabels.Len())
+
+	err := s.Close()
+	require.NoError(t, err)
+}
+
+// mustURLParse parses a URL and panics on error.
+func mustURLParse(rawURL string) *url.URL {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		panic(fmt.Sprintf("failed to parse URL %q: %v", rawURL, err))
+	}
+	return u
+}
+
+// baseRemoteWriteConfig copy values from global Default Write config
+// to avoid change global state and cross impact test execution.
+func baseRemoteWriteConfig(host string) *config.RemoteWriteConfig {
+	cfg := config.DefaultRemoteWriteConfig
+	cfg.URL = &common_config.URL{
+		URL: mustURLParse(host),
+	}
+	return &cfg
+}
+
+// baseRemoteReadConfig copy values from global Default Read config
+// to avoid change global state and cross impact test execution.
+func baseRemoteReadConfig(host string) *config.RemoteReadConfig {
+	cfg := config.DefaultRemoteReadConfig
+	cfg.URL = &common_config.URL{
+		URL: mustURLParse(host),
+	}
+	return &cfg
+}
+
+// TestWriteStorageApplyConfigsDuringCommit helps detecting races when
+// ApplyConfig runs concurrently with Notify
+// See https://github.com/prometheus/prometheus/issues/12747
+func TestWriteStorageApplyConfigsDuringCommit(t *testing.T) {
+	s := NewStorage(nil, nil, nil, t.TempDir(), defaultFlushDeadline, nil, false)
+
+	var wg sync.WaitGroup
+	wg.Add(2000)
+
+	start := make(chan struct{})
+	for i := range 1000 {
+		go func(i int) {
+			<-start
+			conf := &config.Config{
+				GlobalConfig: config.DefaultGlobalConfig,
+				RemoteWriteConfigs: []*config.RemoteWriteConfig{
+					baseRemoteWriteConfig(fmt.Sprintf("http://test-%d.com", i)),
+				},
+			}
+			require.NoError(t, s.ApplyConfig(conf))
+			wg.Done()
+		}(i)
+	}
+
+	for range 1000 {
+		go func() {
+			<-start
+			s.Notify()
+			wg.Done()
+		}()
+	}
+
+	close(start)
+	wg.Wait()
 }

@@ -1,4 +1,4 @@
-// Copyright 2015 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -16,17 +16,20 @@ package zookeeper
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/go-kit/kit/log"
-	"github.com/pkg/errors"
+	"github.com/go-zookeeper/zk"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
-	"github.com/samuel/go-zookeeper/zk"
+	"github.com/prometheus/common/promslog"
 
+	"github.com/prometheus/prometheus/discovery"
 	"github.com/prometheus/prometheus/discovery/targetgroup"
 	"github.com/prometheus/prometheus/util/strutil"
 	"github.com/prometheus/prometheus/util/treecache"
@@ -43,6 +46,11 @@ var (
 	}
 )
 
+func init() {
+	discovery.RegisterConfig(&ServersetSDConfig{})
+	discovery.RegisterConfig(&NerveSDConfig{})
+}
+
 // ServersetSDConfig is the configuration for Twitter serversets in Zookeeper based discovery.
 type ServersetSDConfig struct {
 	Servers []string       `yaml:"servers"`
@@ -50,8 +58,21 @@ type ServersetSDConfig struct {
 	Timeout model.Duration `yaml:"timeout,omitempty"`
 }
 
+// NewDiscovererMetrics implements discovery.Config.
+func (*ServersetSDConfig) NewDiscovererMetrics(prometheus.Registerer, discovery.RefreshMetricsInstantiator) discovery.DiscovererMetrics {
+	return &discovery.NoopDiscovererMetrics{}
+}
+
+// Name returns the name of the Config.
+func (*ServersetSDConfig) Name() string { return "serverset" }
+
+// NewDiscoverer returns a Discoverer for the Config.
+func (c *ServersetSDConfig) NewDiscoverer(opts discovery.DiscovererOptions) (discovery.Discoverer, error) {
+	return NewServersetDiscovery(c, opts.Logger)
+}
+
 // UnmarshalYAML implements the yaml.Unmarshaler interface.
-func (c *ServersetSDConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
+func (c *ServersetSDConfig) UnmarshalYAML(unmarshal func(any) error) error {
 	*c = DefaultServersetSDConfig
 	type plain ServersetSDConfig
 	err := unmarshal((*plain)(c))
@@ -66,7 +87,7 @@ func (c *ServersetSDConfig) UnmarshalYAML(unmarshal func(interface{}) error) err
 	}
 	for _, path := range c.Paths {
 		if !strings.HasPrefix(path, "/") {
-			return errors.Errorf("serverset SD config paths must begin with '/': %s", path)
+			return fmt.Errorf("serverset SD config paths must begin with '/': %s", path)
 		}
 	}
 	return nil
@@ -79,8 +100,21 @@ type NerveSDConfig struct {
 	Timeout model.Duration `yaml:"timeout,omitempty"`
 }
 
+// NewDiscovererMetrics implements discovery.Config.
+func (*NerveSDConfig) NewDiscovererMetrics(prometheus.Registerer, discovery.RefreshMetricsInstantiator) discovery.DiscovererMetrics {
+	return &discovery.NoopDiscovererMetrics{}
+}
+
+// Name returns the name of the Config.
+func (*NerveSDConfig) Name() string { return "nerve" }
+
+// NewDiscoverer returns a Discoverer for the Config.
+func (c *NerveSDConfig) NewDiscoverer(opts discovery.DiscovererOptions) (discovery.Discoverer, error) {
+	return NewNerveDiscovery(c, opts.Logger)
+}
+
 // UnmarshalYAML implements the yaml.Unmarshaler interface.
-func (c *NerveSDConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
+func (c *NerveSDConfig) UnmarshalYAML(unmarshal func(any) error) error {
 	*c = DefaultNerveSDConfig
 	type plain NerveSDConfig
 	err := unmarshal((*plain)(c))
@@ -95,7 +129,7 @@ func (c *NerveSDConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	}
 	for _, path := range c.Paths {
 		if !strings.HasPrefix(path, "/") {
-			return errors.Errorf("nerve SD config paths must begin with '/': %s", path)
+			return fmt.Errorf("nerve SD config paths must begin with '/': %s", path)
 		}
 	}
 	return nil
@@ -113,16 +147,16 @@ type Discovery struct {
 	treeCaches  []*treecache.ZookeeperTreeCache
 
 	parse  func(data []byte, path string) (model.LabelSet, error)
-	logger log.Logger
+	logger *slog.Logger
 }
 
 // NewNerveDiscovery returns a new Discovery for the given Nerve config.
-func NewNerveDiscovery(conf *NerveSDConfig, logger log.Logger) (*Discovery, error) {
+func NewNerveDiscovery(conf *NerveSDConfig, logger *slog.Logger) (*Discovery, error) {
 	return NewDiscovery(conf.Servers, time.Duration(conf.Timeout), conf.Paths, logger, parseNerveMember)
 }
 
 // NewServersetDiscovery returns a new Discovery for the given serverset config.
-func NewServersetDiscovery(conf *ServersetSDConfig, logger log.Logger) (*Discovery, error) {
+func NewServersetDiscovery(conf *ServersetSDConfig, logger *slog.Logger) (*Discovery, error) {
 	return NewDiscovery(conf.Servers, time.Duration(conf.Timeout), conf.Paths, logger, parseServersetMember)
 }
 
@@ -132,11 +166,11 @@ func NewDiscovery(
 	srvs []string,
 	timeout time.Duration,
 	paths []string,
-	logger log.Logger,
+	logger *slog.Logger,
 	pf func(data []byte, path string) (model.LabelSet, error),
 ) (*Discovery, error) {
 	if logger == nil {
-		logger = log.NewNopLogger()
+		logger = promslog.NewNopLogger()
 	}
 
 	conn, _, err := zk.Connect(
@@ -241,24 +275,23 @@ func parseServersetMember(data []byte, path string) (model.LabelSet, error) {
 	member := serversetMember{}
 
 	if err := json.Unmarshal(data, &member); err != nil {
-		return nil, errors.Wrapf(err, "error unmarshaling serverset member %q", path)
+		return nil, fmt.Errorf("error unmarshaling serverset member %q: %w", path, err)
 	}
 
 	labels := model.LabelSet{}
 	labels[serversetPathLabel] = model.LabelValue(path)
 	labels[model.AddressLabel] = model.LabelValue(
-		net.JoinHostPort(member.ServiceEndpoint.Host, fmt.Sprintf("%d", member.ServiceEndpoint.Port)))
+		net.JoinHostPort(member.ServiceEndpoint.Host, strconv.Itoa(member.ServiceEndpoint.Port)))
 
 	labels[serversetEndpointLabelPrefix+"_host"] = model.LabelValue(member.ServiceEndpoint.Host)
-	labels[serversetEndpointLabelPrefix+"_port"] = model.LabelValue(fmt.Sprintf("%d", member.ServiceEndpoint.Port))
+	labels[serversetEndpointLabelPrefix+"_port"] = model.LabelValue(strconv.Itoa(member.ServiceEndpoint.Port))
 
 	for name, endpoint := range member.AdditionalEndpoints {
 		cleanName := model.LabelName(strutil.SanitizeLabelName(name))
 		labels[serversetEndpointLabelPrefix+"_host_"+cleanName] = model.LabelValue(
 			endpoint.Host)
 		labels[serversetEndpointLabelPrefix+"_port_"+cleanName] = model.LabelValue(
-			fmt.Sprintf("%d", endpoint.Port))
-
+			strconv.Itoa(endpoint.Port))
 	}
 
 	labels[serversetStatusLabel] = model.LabelValue(member.Status)
@@ -283,16 +316,16 @@ func parseNerveMember(data []byte, path string) (model.LabelSet, error) {
 	member := nerveMember{}
 	err := json.Unmarshal(data, &member)
 	if err != nil {
-		return nil, errors.Wrapf(err, "error unmarshaling nerve member %q", path)
+		return nil, fmt.Errorf("error unmarshaling nerve member %q: %w", path, err)
 	}
 
 	labels := model.LabelSet{}
 	labels[nervePathLabel] = model.LabelValue(path)
 	labels[model.AddressLabel] = model.LabelValue(
-		net.JoinHostPort(member.Host, fmt.Sprintf("%d", member.Port)))
+		net.JoinHostPort(member.Host, strconv.Itoa(member.Port)))
 
 	labels[nerveEndpointLabelPrefix+"_host"] = model.LabelValue(member.Host)
-	labels[nerveEndpointLabelPrefix+"_port"] = model.LabelValue(fmt.Sprintf("%d", member.Port))
+	labels[nerveEndpointLabelPrefix+"_port"] = model.LabelValue(strconv.Itoa(member.Port))
 	labels[nerveEndpointLabelPrefix+"_name"] = model.LabelValue(member.Name)
 
 	return labels, nil

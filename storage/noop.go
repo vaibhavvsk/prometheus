@@ -1,4 +1,4 @@
-// Copyright 2017 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -14,9 +14,10 @@
 package storage
 
 import (
-	"math"
+	"context"
 
-	"github.com/prometheus/prometheus/pkg/labels"
+	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/util/annotations"
 )
 
 type noopQuerier struct{}
@@ -26,23 +27,52 @@ func NoopQuerier() Querier {
 	return noopQuerier{}
 }
 
-func (noopQuerier) Select(*SelectParams, ...*labels.Matcher) (SeriesSet, Warnings, error) {
-	return NoopSeriesSet(), nil, nil
+func (noopQuerier) Select(context.Context, bool, *SelectHints, ...*labels.Matcher) SeriesSet {
+	return NoopSeriesSet()
 }
 
-func (noopQuerier) SelectSorted(*SelectParams, ...*labels.Matcher) (SeriesSet, Warnings, error) {
-	return NoopSeriesSet(), nil, nil
-}
-
-func (noopQuerier) LabelValues(name string) ([]string, Warnings, error) {
+func (noopQuerier) LabelValues(context.Context, string, *LabelHints, ...*labels.Matcher) ([]string, annotations.Annotations, error) {
 	return nil, nil, nil
 }
 
-func (noopQuerier) LabelNames() ([]string, Warnings, error) {
+func (noopQuerier) LabelNames(context.Context, *LabelHints, ...*labels.Matcher) ([]string, annotations.Annotations, error) {
 	return nil, nil, nil
 }
 
 func (noopQuerier) Close() error {
+	return nil
+}
+
+func (noopQuerier) SearchLabelNames(_ context.Context, _ *SearchHints, _ ...*labels.Matcher) SearchResultSet {
+	return nil
+}
+
+func (noopQuerier) SearchLabelValues(_ context.Context, _ string, _ *SearchHints, _ ...*labels.Matcher) SearchResultSet {
+	return nil
+}
+
+var _ Searcher = noopQuerier{}
+
+type noopChunkQuerier struct{}
+
+// NoopChunkedQuerier is a ChunkQuerier that does nothing.
+func NoopChunkedQuerier() ChunkQuerier {
+	return noopChunkQuerier{}
+}
+
+func (noopChunkQuerier) Select(context.Context, bool, *SelectHints, ...*labels.Matcher) ChunkSeriesSet {
+	return NoopChunkedSeriesSet()
+}
+
+func (noopChunkQuerier) LabelValues(context.Context, string, *LabelHints, ...*labels.Matcher) ([]string, annotations.Annotations, error) {
+	return nil, nil, nil
+}
+
+func (noopChunkQuerier) LabelNames(context.Context, *LabelHints, ...*labels.Matcher) ([]string, annotations.Annotations, error) {
+	return nil, nil, nil
+}
+
+func (noopChunkQuerier) Close() error {
 	return nil
 }
 
@@ -53,35 +83,25 @@ func NoopSeriesSet() SeriesSet {
 	return noopSeriesSet{}
 }
 
-func (noopSeriesSet) Next() bool {
-	return false
+func (noopSeriesSet) Next() bool { return false }
+
+func (noopSeriesSet) At() Series { return nil }
+
+func (noopSeriesSet) Err() error { return nil }
+
+func (noopSeriesSet) Warnings() annotations.Annotations { return nil }
+
+type noopChunkedSeriesSet struct{}
+
+// NoopChunkedSeriesSet is a ChunkSeriesSet that does nothing.
+func NoopChunkedSeriesSet() ChunkSeriesSet {
+	return noopChunkedSeriesSet{}
 }
 
-func (noopSeriesSet) At() Series {
-	return nil
-}
+func (noopChunkedSeriesSet) Next() bool { return false }
 
-func (noopSeriesSet) Err() error {
-	return nil
-}
+func (noopChunkedSeriesSet) At() ChunkSeries { return nil }
 
-type noopSeriesIterator struct{}
+func (noopChunkedSeriesSet) Err() error { return nil }
 
-// NoopSeriesIt is a SeriesIterator that does nothing.
-var NoopSeriesIt = noopSeriesIterator{}
-
-func (noopSeriesIterator) At() (int64, float64) {
-	return math.MinInt64, 0
-}
-
-func (noopSeriesIterator) Seek(t int64) bool {
-	return false
-}
-
-func (noopSeriesIterator) Next() bool {
-	return false
-}
-
-func (noopSeriesIterator) Err() error {
-	return nil
-}
+func (noopChunkedSeriesSet) Warnings() annotations.Annotations { return nil }

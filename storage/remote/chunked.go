@@ -1,4 +1,4 @@
-// Copyright 2019 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -10,23 +10,21 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
 package remote
 
 import (
 	"bufio"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"hash"
 	"hash/crc32"
 	"io"
 	"net/http"
 
 	"github.com/gogo/protobuf/proto"
-	"github.com/pkg/errors"
 )
-
-// DefaultChunkedReadLimit is the default value for the maximum size of the protobuf frame client allows.
-// 50MB is the default. This is equivalent to ~100k full XOR chunks and average labelset.
-const DefaultChunkedReadLimit = 5e+7
 
 // The table gets initialized with sync.Once but may still cause a race
 // with any other use of the crc32 package anywhere. Thus we initialize it
@@ -46,12 +44,19 @@ type ChunkedWriter struct {
 	crc32 hash.Hash32
 }
 
-// NewChunkedWriter constructs a ChunkedWriter.
+// NewChunkedWriter constructs a ChunkedWriter. After using the ChunkWriter,
+// Close() needs to be called.
 func NewChunkedWriter(w io.Writer, f http.Flusher) *ChunkedWriter {
 	return &ChunkedWriter{writer: w, flusher: f, crc32: crc32.New(castagnoliTable)}
 }
 
-// Write writes given bytes to the stream and flushes it.
+// Close ensures that all data ends up on the wire.
+func (w *ChunkedWriter) Close() {
+	w.flusher.Flush()
+}
+
+// Write writes given bytes to the stream. The underlying flusher is invoked
+// only on Close, so callers control batching by choosing when to Close.
 // Each frame includes:
 //
 // 1. uvarint for the size of the data frame.
@@ -79,13 +84,7 @@ func (w *ChunkedWriter) Write(b []byte) (int, error) {
 		return 0, err
 	}
 
-	n, err := w.writer.Write(b)
-	if err != nil {
-		return n, err
-	}
-
-	w.flusher.Flush()
-	return n, nil
+	return w.writer.Write(b)
 }
 
 // ChunkedReader is a buffered reader that expects uvarint delimiter and checksum before each message.
@@ -118,7 +117,7 @@ func (r *ChunkedReader) Next() ([]byte, error) {
 	}
 
 	if size > r.sizeLimit {
-		return nil, errors.Errorf("chunkedReader: message size exceeded the limit %v bytes; got: %v bytes", r.sizeLimit, size)
+		return nil, fmt.Errorf("chunkedReader: message size exceeded the limit %v bytes; got: %v bytes", r.sizeLimit, size)
 	}
 
 	if cap(r.data) < int(size) {

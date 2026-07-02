@@ -1,4 +1,4 @@
-// Copyright 2017 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -22,7 +22,7 @@ type roundTrip struct {
 	theError    error
 }
 
-func (rt *roundTrip) RoundTrip(r *http.Request) (*http.Response, error) {
+func (rt *roundTrip) RoundTrip(*http.Request) (*http.Response, error) {
 	return rt.theResponse, rt.theError
 }
 
@@ -43,5 +43,7 @@ func NewRoundTripCheckRequest(checkRequest func(*http.Request), theResponse *htt
 		checkRequest: checkRequest,
 		roundTrip: roundTrip{
 			theResponse: theResponse,
-			theError:    theError}}
+			theError:    theError,
+		},
+	}
 }

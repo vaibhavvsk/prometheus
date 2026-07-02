@@ -1,4 +1,4 @@
-// Copyright 2015 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,60 +15,81 @@ package consul
 
 import (
 	"context"
-	"testing"
-	"time"
-
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"testing"
+	"time"
 
-	"github.com/go-kit/kit/log"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
+	"github.com/prometheus/common/promslog"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
+	"go.yaml.in/yaml/v2"
+
+	"github.com/prometheus/prometheus/discovery"
 	"github.com/prometheus/prometheus/discovery/targetgroup"
-	"github.com/prometheus/prometheus/util/testutil"
 )
 
-func TestConfiguredService(t *testing.T) {
-	conf := &SDConfig{
-		Services: []string{"configuredServiceName"}}
-	consulDiscovery, err := NewDiscovery(conf, nil)
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
+}
 
-	if err != nil {
-		t.Errorf("Unexpected error when initializing discovery %v", err)
+// TODO: Add ability to unregister metrics?
+func NewTestMetrics(t *testing.T, conf discovery.Config, reg prometheus.Registerer) discovery.DiscovererMetrics {
+	refreshMetrics := discovery.NewRefreshMetrics(reg)
+	require.NoError(t, refreshMetrics.Register())
+
+	metrics := conf.NewDiscovererMetrics(prometheus.NewRegistry(), refreshMetrics)
+	require.NoError(t, metrics.Register())
+
+	return metrics
+}
+
+func TestConfiguredService(t *testing.T) {
+	t.Parallel()
+	conf := &SDConfig{
+		Services: []string{"configuredServiceName"},
 	}
-	if !consulDiscovery.shouldWatch("configuredServiceName", []string{""}) {
-		t.Errorf("Expected service %s to be watched", "configuredServiceName")
-	}
-	if consulDiscovery.shouldWatch("nonConfiguredServiceName", []string{""}) {
-		t.Errorf("Expected service %s to not be watched", "nonConfiguredServiceName")
-	}
+
+	metrics := NewTestMetrics(t, conf, prometheus.NewRegistry())
+
+	consulDiscovery, err := NewDiscovery(conf, nil, metrics)
+	require.NoError(t, err, "when initializing discovery")
+	require.True(t, consulDiscovery.shouldWatch("configuredServiceName", []string{""}),
+		"Expected service %s to be watched", "configuredServiceName")
+	require.False(t, consulDiscovery.shouldWatch("nonConfiguredServiceName", []string{""}),
+		"Expected service %s to not be watched", "nonConfiguredServiceName")
 }
 
 func TestConfiguredServiceWithTag(t *testing.T) {
+	t.Parallel()
 	conf := &SDConfig{
 		Services:    []string{"configuredServiceName"},
 		ServiceTags: []string{"http"},
 	}
-	consulDiscovery, err := NewDiscovery(conf, nil)
 
-	if err != nil {
-		t.Errorf("Unexpected error when initializing discovery %v", err)
-	}
-	if consulDiscovery.shouldWatch("configuredServiceName", []string{""}) {
-		t.Errorf("Expected service %s to not be watched without tag", "configuredServiceName")
-	}
-	if !consulDiscovery.shouldWatch("configuredServiceName", []string{"http"}) {
-		t.Errorf("Expected service %s to be watched with tag %s", "configuredServiceName", "http")
-	}
-	if consulDiscovery.shouldWatch("nonConfiguredServiceName", []string{""}) {
-		t.Errorf("Expected service %s to not be watched without tag", "nonConfiguredServiceName")
-	}
-	if consulDiscovery.shouldWatch("nonConfiguredServiceName", []string{"http"}) {
-		t.Errorf("Expected service %s to not be watched with tag %s", "nonConfiguredServiceName", "http")
-	}
+	metrics := NewTestMetrics(t, conf, prometheus.NewRegistry())
+
+	consulDiscovery, err := NewDiscovery(conf, nil, metrics)
+	require.NoError(t, err, "when initializing discovery")
+	require.False(t, consulDiscovery.shouldWatch("configuredServiceName", []string{""}),
+		"Expected service %s to not be watched without tag", "configuredServiceName")
+
+	require.True(t, consulDiscovery.shouldWatch("configuredServiceName", []string{"http"}),
+		"Expected service %s to be watched with tag %s", "configuredServiceName", "http")
+
+	require.False(t, consulDiscovery.shouldWatch("nonConfiguredServiceName", []string{""}),
+		"Expected service %s to not be watched without tag", "nonConfiguredServiceName")
+
+	require.False(t, consulDiscovery.shouldWatch("nonConfiguredServiceName", []string{"http"}),
+		"Expected service %s to not be watched with tag %s", "nonConfiguredServiceName", "http")
 }
 
 func TestConfiguredServiceWithTags(t *testing.T) {
+	t.Parallel()
 	type testcase struct {
 		// What we've configured to watch.
 		conf *SDConfig
@@ -145,48 +166,70 @@ func TestConfiguredServiceWithTags(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		consulDiscovery, err := NewDiscovery(tc.conf, nil)
+		metrics := NewTestMetrics(t, tc.conf, prometheus.NewRegistry())
 
-		if err != nil {
-			t.Errorf("Unexpected error when initializing discovery %v", err)
-		}
+		consulDiscovery, err := NewDiscovery(tc.conf, nil, metrics)
+		require.NoError(t, err, "when initializing discovery")
 		ret := consulDiscovery.shouldWatch(tc.serviceName, tc.serviceTags)
-		if ret != tc.shouldWatch {
-			t.Errorf("Expected should watch? %t, got %t. Watched service and tags: %s %+v, input was %s %+v", tc.shouldWatch, ret, tc.conf.Services, tc.conf.ServiceTags, tc.serviceName, tc.serviceTags)
-		}
-
+		require.Equal(t, tc.shouldWatch, ret, "Watched service and tags: %s %+v, input was %s %+v",
+			tc.conf.Services, tc.conf.ServiceTags, tc.serviceName, tc.serviceTags)
 	}
 }
 
 func TestNonConfiguredService(t *testing.T) {
+	t.Parallel()
 	conf := &SDConfig{}
-	consulDiscovery, err := NewDiscovery(conf, nil)
 
-	if err != nil {
-		t.Errorf("Unexpected error when initializing discovery %v", err)
-	}
-	if !consulDiscovery.shouldWatch("nonConfiguredServiceName", []string{""}) {
-		t.Errorf("Expected service %s to be watched", "nonConfiguredServiceName")
-	}
+	metrics := NewTestMetrics(t, conf, prometheus.NewRegistry())
+
+	consulDiscovery, err := NewDiscovery(conf, nil, metrics)
+	require.NoError(t, err, "when initializing discovery")
+	require.True(t, consulDiscovery.shouldWatch("nonConfiguredServiceName", []string{""}), "Expected service %s to be watched", "nonConfiguredServiceName")
 }
 
 const (
 	AgentAnswer       = `{"Config": {"Datacenter": "test-dc"}}`
-	ServiceTestAnswer = `[{
-"ID": "b78c2e48-5ef3-1814-31b8-0d880f50471e",
-"Node": "node1",
-"Address": "1.1.1.1",
-"Datacenter": "test-dc",
-"TaggedAddresses": {"lan":"192.168.10.10","wan":"10.0.10.10"},
-"NodeMeta": {"rack_name": "2304"},
-"ServiceID": "test",
-"ServiceName": "test",
-"ServiceMeta": {"version":"1.0.0","environment":"staging"},
-"ServiceTags": ["tag1"],
-"ServicePort": 3341,
-"CreateIndex": 1,
-"ModifyIndex": 1
+	ServiceTestAnswer = `
+[{
+	"Node": {
+		"ID": "b78c2e48-5ef3-1814-31b8-0d880f50471e",
+		"Node": "node1",
+		"Address": "1.1.1.1",
+		"Datacenter": "test-dc",
+		"TaggedAddresses": {
+			"lan": "192.168.10.10",
+			"wan": "10.0.10.10"
+		},
+		"Meta": {"rack_name": "2304"},
+		"CreateIndex": 1,
+		"ModifyIndex": 1
+	},
+	"Service": {
+		"ID": "test",
+		"Service": "test",
+		"Tags": ["tag1"],
+		"Address": "",
+		"Meta": {"version":"1.0.0","environment":"staging"},
+		"Port": 3341,
+		"Weights": {
+			"Passing": 1,
+			"Warning": 1
+		},
+		"EnableTagOverride": false,
+		"ProxyDestination": "",
+		"Proxy": {},
+		"Connect": {},
+		"CreateIndex": 1,
+		"ModifyIndex": 1
+	},
+	"Checks": [{
+		"Node": "node1",
+		"CheckID": "serfHealth",
+		"Name": "Serf Health Status",
+		"Status": "passing"
+	}]
 }]`
+
 	ServicesTestAnswer = `{"test": ["tag1"], "other": ["tag2"]}`
 )
 
@@ -197,21 +240,23 @@ func newServer(t *testing.T) (*httptest.Server, *SDConfig) {
 		switch r.URL.String() {
 		case "/v1/agent/self":
 			response = AgentAnswer
-		case "/v1/catalog/service/test?node-meta=rack_name%3A2304&stale=&tag=tag1&wait=30000ms":
+		case "/v1/health/service/test?node-meta=rack_name%3A2304&stale=&tag=tag1&wait=120000ms":
 			response = ServiceTestAnswer
-		case "/v1/catalog/service/test?wait=30000ms":
+		case "/v1/health/service/test?wait=120000ms":
 			response = ServiceTestAnswer
-		case "/v1/catalog/service/other?wait=30000ms":
+		case "/v1/health/service/other?wait=120000ms":
 			response = `[]`
-		case "/v1/catalog/services?node-meta=rack_name%3A2304&stale=&wait=30000ms":
+		case "/v1/catalog/services?node-meta=rack_name%3A2304&stale=&wait=120000ms":
 			response = ServicesTestAnswer
-		case "/v1/catalog/services?wait=30000ms":
+		case "/v1/catalog/services?wait=120000ms":
 			response = ServicesTestAnswer
-		case "/v1/catalog/services?index=1&node-meta=rack_name%3A2304&stale=&wait=30000ms":
+		case "/v1/catalog/services?index=1&node-meta=rack_name%3A2304&stale=&wait=120000ms":
 			time.Sleep(5 * time.Second)
 			response = ServicesTestAnswer
-		case "/v1/catalog/services?index=1&wait=30000ms":
+		case "/v1/catalog/services?index=1&wait=120000ms":
 			time.Sleep(5 * time.Second)
+			response = ServicesTestAnswer
+		case "/v1/catalog/services?filter=NodeMeta.rack_name+%3D%3D+%222304%22&index=1&wait=120000ms":
 			response = ServicesTestAnswer
 		default:
 			t.Errorf("Unhandled consul call: %s", r.URL)
@@ -220,7 +265,7 @@ func newServer(t *testing.T) (*httptest.Server, *SDConfig) {
 		w.Write([]byte(response))
 	}))
 	stuburl, err := url.Parse(stub.URL)
-	testutil.Ok(t, err)
+	require.NoError(t, err)
 
 	config := &SDConfig{
 		Server:          stuburl.Host,
@@ -231,42 +276,73 @@ func newServer(t *testing.T) (*httptest.Server, *SDConfig) {
 }
 
 func newDiscovery(t *testing.T, config *SDConfig) *Discovery {
-	logger := log.NewNopLogger()
-	d, err := NewDiscovery(config, logger)
-	testutil.Ok(t, err)
+	logger := promslog.NewNopLogger()
+
+	metrics := NewTestMetrics(t, config, prometheus.NewRegistry())
+
+	d, err := NewDiscovery(config, logger, metrics)
+	require.NoError(t, err)
 	return d
 }
 
 func checkOneTarget(t *testing.T, tg []*targetgroup.Group) {
-	testutil.Equals(t, 1, len(tg))
+	require.Len(t, tg, 1)
 	target := tg[0]
-	testutil.Equals(t, "test-dc", string(target.Labels["__meta_consul_dc"]))
-	testutil.Equals(t, target.Source, string(target.Labels["__meta_consul_service"]))
+	require.Equal(t, "test-dc", string(target.Labels["__meta_consul_dc"]))
+	require.Equal(t, target.Source, string(target.Labels["__meta_consul_service"]))
 	if target.Source == "test" {
 		// test service should have one node.
-		testutil.Assert(t, len(target.Targets) > 0, "Test service should have one node")
+		require.NotEmpty(t, target.Targets, "Test service should have one node")
 	}
 }
 
 // Watch all the services in the catalog.
 func TestAllServices(t *testing.T) {
+	t.Parallel()
 	stub, config := newServer(t)
-	defer stub.Close()
+	t.Cleanup(stub.Close)
 
 	d := newDiscovery(t, config)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ch := make(chan []*targetgroup.Group)
-	go d.Run(ctx, ch)
+	go func() {
+		d.Run(ctx, ch)
+		close(ch)
+	}()
 	checkOneTarget(t, <-ch)
 	checkOneTarget(t, <-ch)
 	cancel()
+	<-ch
+}
+
+// targetgroup with no targets is emitted if no services were discovered.
+func TestNoTargets(t *testing.T) {
+	t.Parallel()
+	stub, config := newServer(t)
+	t.Cleanup(stub.Close)
+	config.ServiceTags = []string{"missing"}
+
+	d := newDiscovery(t, config)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := make(chan []*targetgroup.Group)
+	go func() {
+		d.Run(ctx, ch)
+		close(ch)
+	}()
+
+	targets := (<-ch)[0].Targets
+	require.Empty(t, targets)
+	cancel()
+	<-ch
 }
 
 // Watch only the test service.
 func TestOneService(t *testing.T) {
+	t.Parallel()
 	stub, config := newServer(t)
-	defer stub.Close()
+	t.Cleanup(stub.Close)
 
 	config.Services = []string{"test"}
 	d := newDiscovery(t, config)
@@ -280,8 +356,9 @@ func TestOneService(t *testing.T) {
 
 // Watch the test service with a specific tag and node-meta.
 func TestAllOptions(t *testing.T) {
+	t.Parallel()
 	stub, config := newServer(t)
-	defer stub.Close()
+	t.Cleanup(stub.Close)
 
 	config.Services = []string{"test"}
 	config.NodeMeta = map[string]string{"rack_name": "2304"}
@@ -293,26 +370,210 @@ func TestAllOptions(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	ch := make(chan []*targetgroup.Group)
-	go d.Run(ctx, ch)
+	go func() {
+		d.Run(ctx, ch)
+		close(ch)
+	}()
 	checkOneTarget(t, <-ch)
 	cancel()
+	<-ch
+}
+
+// TestFilterOption verifies that when services and filter are both configured, the Catalog API
+// is still called and receives the filter parameter, while the Health API does not.
+func TestFilterOption(t *testing.T) {
+	t.Parallel()
+	var (
+		catalogCalled bool
+		catalogFilter string
+		healthCalled  bool
+		healthFilter  string
+	)
+
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("X-Consul-Index", "1")
+		switch r.URL.Path {
+		case "/v1/agent/self":
+			w.Write([]byte(AgentAnswer))
+		case "/v1/catalog/services":
+			catalogCalled = true
+			catalogFilter = r.URL.Query().Get("filter")
+			w.Write([]byte(`{"test": []}`))
+		case "/v1/health/service/test":
+			healthCalled = true
+			healthFilter = r.URL.Query().Get("filter")
+			w.Write([]byte(ServiceTestAnswer))
+		default:
+			t.Errorf("Unhandled consul call: %s", r.URL)
+		}
+	}))
+	t.Cleanup(stub.Close)
+
+	stuburl, err := url.Parse(stub.URL)
+	require.NoError(t, err)
+
+	cfg := &SDConfig{
+		Server:          stuburl.Host,
+		Services:        []string{"test"},
+		Filter:          `NodeMeta.rack_name == "2304"`,
+		RefreshInterval: model.Duration(1 * time.Second),
+	}
+
+	d := newDiscovery(t, cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := make(chan []*targetgroup.Group)
+	go func() {
+		d.Run(ctx, ch)
+		close(ch)
+	}()
+	checkOneTarget(t, <-ch)
+	// All handler writes happened-before the channel receive above.
+	require.True(t, catalogCalled, "Catalog endpoint should be called when filter is set alongside services.")
+	require.Equal(t, `NodeMeta.rack_name == "2304"`, catalogFilter, "Catalog should receive the filter parameter.")
+	require.True(t, healthCalled, "Health endpoint should be called.")
+	require.Empty(t, healthFilter, "Health endpoint should not receive the catalog filter.")
+	cancel()
+	for range ch {
+	}
+}
+
+// TestHealthFilterOption verifies that health_filter is passed to the Health API and not to
+// the Catalog API.
+func TestHealthFilterOption(t *testing.T) {
+	t.Parallel()
+	var (
+		catalogCalled bool
+		catalogFilter string
+		healthCalled  bool
+		healthFilter  string
+	)
+
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("X-Consul-Index", "1")
+		switch r.URL.Path {
+		case "/v1/agent/self":
+			w.Write([]byte(AgentAnswer))
+		case "/v1/catalog/services":
+			catalogCalled = true
+			catalogFilter = r.URL.Query().Get("filter")
+			w.Write([]byte(`{"test": []}`))
+		case "/v1/health/service/test":
+			healthCalled = true
+			healthFilter = r.URL.Query().Get("filter")
+			w.Write([]byte(ServiceTestAnswer))
+		default:
+			t.Errorf("Unhandled consul call: %s", r.URL)
+		}
+	}))
+	t.Cleanup(stub.Close)
+
+	stuburl, err := url.Parse(stub.URL)
+	require.NoError(t, err)
+
+	// No services configured: catalog path is always used, allowing us to assert
+	// that health_filter is not forwarded to the Catalog API.
+	cfg := &SDConfig{
+		Server:          stuburl.Host,
+		HealthFilter:    `Service.Tags contains "canary"`,
+		RefreshInterval: model.Duration(1 * time.Second),
+	}
+
+	d := newDiscovery(t, cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := make(chan []*targetgroup.Group)
+	go func() {
+		d.Run(ctx, ch)
+		close(ch)
+	}()
+	checkOneTarget(t, <-ch)
+	// All handler writes happened-before the channel receive above.
+	require.True(t, catalogCalled, "Catalog endpoint should be called.")
+	require.Empty(t, catalogFilter, "Catalog should not receive the health_filter parameter.")
+	require.True(t, healthCalled, "Health endpoint should be called.")
+	require.Equal(t, `Service.Tags contains "canary"`, healthFilter, "Health endpoint should receive the health_filter parameter.")
+	cancel()
+	for range ch {
+	}
+}
+
+// TestBothFiltersOption verifies that when both filter and health_filter are configured,
+// each filter is sent exclusively to its respective API endpoint.
+func TestBothFiltersOption(t *testing.T) {
+	t.Parallel()
+	var (
+		catalogCalled bool
+		catalogFilter string
+		healthCalled  bool
+		healthFilter  string
+	)
+
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("X-Consul-Index", "1")
+		switch r.URL.Path {
+		case "/v1/agent/self":
+			w.Write([]byte(AgentAnswer))
+		case "/v1/catalog/services":
+			catalogCalled = true
+			catalogFilter = r.URL.Query().Get("filter")
+			w.Write([]byte(`{"test": []}`))
+		case "/v1/health/service/test":
+			healthCalled = true
+			healthFilter = r.URL.Query().Get("filter")
+			w.Write([]byte(ServiceTestAnswer))
+		default:
+			t.Errorf("Unhandled consul call: %s", r.URL)
+		}
+	}))
+	t.Cleanup(stub.Close)
+
+	stuburl, err := url.Parse(stub.URL)
+	require.NoError(t, err)
+
+	cfg := &SDConfig{
+		Server:          stuburl.Host,
+		Services:        []string{"test"},
+		Filter:          `NodeMeta.rack_name == "2304"`,
+		HealthFilter:    `Service.Tags contains "canary"`,
+		RefreshInterval: model.Duration(1 * time.Second),
+	}
+
+	d := newDiscovery(t, cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ch := make(chan []*targetgroup.Group)
+	go func() {
+		d.Run(ctx, ch)
+		close(ch)
+	}()
+	checkOneTarget(t, <-ch)
+	// All handler writes happened-before the channel receive above.
+	require.True(t, catalogCalled, "Catalog endpoint should be called when filter is set.")
+	require.Equal(t, `NodeMeta.rack_name == "2304"`, catalogFilter, "Catalog should receive only the catalog filter.")
+	require.True(t, healthCalled, "Health endpoint should be called.")
+	require.Equal(t, `Service.Tags contains "canary"`, healthFilter, "Health endpoint should receive only the health_filter.")
+	cancel()
+	for range ch {
+	}
 }
 
 func TestGetDatacenterShouldReturnError(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		handler    func(http.ResponseWriter, *http.Request)
 		errMessage string
 	}{
 		{
 			// Define a handler that will return status 500.
-			handler: func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(500)
+			handler: func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
 			},
 			errMessage: "Unexpected response code: 500 ()",
 		},
 		{
 			// Define a handler that will return incorrect response.
-			handler: func(w http.ResponseWriter, r *http.Request) {
+			handler: func(w http.ResponseWriter, _ *http.Request) {
 				w.Write([]byte(`{"Config": {"Not-Datacenter": "test-dc"}}`))
 			},
 			errMessage: "invalid value '<nil>' for Config.Datacenter",
@@ -320,24 +581,111 @@ func TestGetDatacenterShouldReturnError(t *testing.T) {
 	} {
 		stub := httptest.NewServer(http.HandlerFunc(tc.handler))
 		stuburl, err := url.Parse(stub.URL)
-		testutil.Ok(t, err)
+		require.NoError(t, err)
 
 		config := &SDConfig{
 			Server:          stuburl.Host,
 			Token:           "fake-token",
 			RefreshInterval: model.Duration(1 * time.Second),
 		}
-		defer stub.Close()
+		t.Cleanup(stub.Close)
 		d := newDiscovery(t, config)
 
 		// Should be empty if not initialized.
-		testutil.Equals(t, "", d.clientDatacenter)
+		require.Empty(t, d.clientDatacenter)
 
 		err = d.getDatacenter()
 
 		// An error should be returned.
-		testutil.Equals(t, tc.errMessage, err.Error())
+		require.EqualError(t, err, tc.errMessage)
 		// Should still be empty.
-		testutil.Equals(t, "", d.clientDatacenter)
+		require.Empty(t, d.clientDatacenter)
+	}
+}
+
+func TestUnmarshalConfig(t *testing.T) {
+	t.Parallel()
+	unmarshal := func(d []byte) func(any) error {
+		return func(o any) error {
+			return yaml.Unmarshal(d, o)
+		}
+	}
+
+	goodConfig := DefaultSDConfig
+	goodConfig.Username = "123"
+	goodConfig.Password = "1234"
+	goodConfig.HTTPClientConfig = config.HTTPClientConfig{
+		BasicAuth: &config.BasicAuth{
+			Username: "123",
+			Password: "1234",
+		},
+		FollowRedirects: true,
+		EnableHTTP2:     true,
+	}
+
+	cases := []struct {
+		name       string
+		config     string
+		expected   SDConfig
+		errMessage string
+	}{
+		{
+			name: "good",
+			config: `
+server: localhost:8500
+username: 123
+password: 1234
+`,
+			expected: goodConfig,
+		},
+		{
+			name: "username and password and basic auth configured",
+			config: `
+server: localhost:8500
+username: 123
+password: 1234
+basic_auth:
+  username: 12345
+  password: 123456
+`,
+			errMessage: "at most one of consul SD configuration username and password and basic auth can be configured",
+		},
+		{
+			name: "token and authorization configured",
+			config: `
+server: localhost:8500
+token: 1234567
+authorization:
+  credentials: 12345678
+`,
+			errMessage: "at most one of consul SD token, authorization, or oauth2 can be configured",
+		},
+		{
+			name: "token and oauth2 configured",
+			config: `
+server: localhost:8500
+token: 1234567
+oauth2:
+  client_id: 10
+  client_secret: 11
+  token_url: http://example.com
+`,
+			errMessage: "at most one of consul SD token, authorization, or oauth2 can be configured",
+		},
+	}
+
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var config SDConfig
+			err := config.UnmarshalYAML(unmarshal([]byte(test.config)))
+			if err != nil {
+				require.EqualError(t, err, test.errMessage)
+				return
+			}
+			require.Empty(t, test.errMessage, "Expected error.")
+
+			require.Equal(t, test.expected, config)
+		})
 	}
 }

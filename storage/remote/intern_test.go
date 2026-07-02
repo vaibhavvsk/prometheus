@@ -1,4 +1,4 @@
-// Copyright 2019 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -19,70 +19,75 @@
 package remote
 
 import (
-	"fmt"
-	"sync/atomic"
 	"testing"
-	"time"
 
-	"github.com/prometheus/prometheus/util/testutil"
+	"github.com/stretchr/testify/require"
 )
 
 func TestIntern(t *testing.T) {
+	interner := newPool()
 	testString := "TestIntern"
 	interner.intern(testString)
 	interned, ok := interner.pool[testString]
 
-	testutil.Equals(t, true, ok)
-	testutil.Assert(t, interned.refs == 1, fmt.Sprintf("expected refs to be 1 but it was %d", interned.refs))
+	require.True(t, ok)
+	require.Equalf(t, int64(1), interned.refs.Load(), "expected refs to be 1 but it was %d", interned.refs.Load())
 }
 
 func TestIntern_MultiRef(t *testing.T) {
+	interner := newPool()
 	testString := "TestIntern_MultiRef"
 
 	interner.intern(testString)
 	interned, ok := interner.pool[testString]
 
-	testutil.Equals(t, true, ok)
-	testutil.Assert(t, interned.refs == 1, fmt.Sprintf("expected refs to be 1 but it was %d", interned.refs))
+	require.True(t, ok)
+	require.Equalf(t, int64(1), interned.refs.Load(), "expected refs to be 1 but it was %d", interned.refs.Load())
 
 	interner.intern(testString)
 	interned, ok = interner.pool[testString]
 
-	testutil.Equals(t, true, ok)
-	testutil.Assert(t, interned.refs == 2, fmt.Sprintf("expected refs to be 2 but it was %d", interned.refs))
+	require.True(t, ok)
+	require.Equalf(t, int64(2), interned.refs.Load(), "expected refs to be 2 but it was %d", interned.refs.Load())
 }
 
 func TestIntern_DeleteRef(t *testing.T) {
+	interner := newPool()
 	testString := "TestIntern_DeleteRef"
 
 	interner.intern(testString)
 	interned, ok := interner.pool[testString]
 
-	testutil.Equals(t, true, ok)
-	testutil.Assert(t, interned.refs == 1, fmt.Sprintf("expected refs to be 1 but it was %d", interned.refs))
+	require.True(t, ok)
+	require.Equalf(t, int64(1), interned.refs.Load(), "expected refs to be 1 but it was %d", interned.refs.Load())
 
 	interner.release(testString)
 	_, ok = interner.pool[testString]
-	testutil.Equals(t, false, ok)
+	require.False(t, ok)
 }
 
 func TestIntern_MultiRef_Concurrent(t *testing.T) {
+	interner := newPool()
 	testString := "TestIntern_MultiRef_Concurrent"
 
 	interner.intern(testString)
 	interned, ok := interner.pool[testString]
-	testutil.Equals(t, true, ok)
-	testutil.Assert(t, interned.refs == 1, fmt.Sprintf("expected refs to be 1 but it was %d", interned.refs))
+	require.True(t, ok)
+	require.Equal(t, int64(1), interned.refs.Load(), "wrong interned refs count")
 
-	go interner.release(testString)
-
-	interner.intern(testString)
-
-	time.Sleep(time.Millisecond)
+	for range 1000 {
+		released := make(chan struct{})
+		go func() {
+			interner.release(testString)
+			close(released)
+		}()
+		interner.intern(testString)
+		<-released
+	}
 
 	interner.mtx.RLock()
 	interned, ok = interner.pool[testString]
 	interner.mtx.RUnlock()
-	testutil.Equals(t, true, ok)
-	testutil.Assert(t, atomic.LoadInt64(&interned.refs) == 1, fmt.Sprintf("expected refs to be 1 but it was %d", interned.refs))
+	require.True(t, ok)
+	require.Equal(t, int64(1), interned.refs.Load(), "wrong interned refs count")
 }

@@ -1,4 +1,4 @@
-// Copyright 2015 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -11,26 +11,92 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package promql
+package promql_test
 
 import (
-	"path/filepath"
+	"context"
+	"strings"
 	"testing"
+	"time"
 
-	"github.com/prometheus/prometheus/util/testutil"
+	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/errgroup"
+
+	"github.com/prometheus/prometheus/promql"
+	"github.com/prometheus/prometheus/promql/parser"
+	"github.com/prometheus/prometheus/promql/promqltest"
+	"github.com/prometheus/prometheus/util/teststorage"
 )
 
+func newTestEngine(t *testing.T) *promql.Engine {
+	return promqltest.NewTestEngine(t, false, 0, promqltest.DefaultMaxSamplesPerQuery)
+}
+
 func TestEvaluations(t *testing.T) {
-	files, err := filepath.Glob("testdata/*.test")
-	testutil.Ok(t, err)
+	promqltest.RunBuiltinTests(t, newTestEngine(t))
+}
 
-	for _, fn := range files {
-		test, err := newTestFromFile(t, fn)
-		testutil.Ok(t, err)
+// Run a lot of queries at the same time, to check for race conditions.
+func TestConcurrentRangeQueries(t *testing.T) {
+	stor := teststorage.New(t)
 
-		err = test.Run()
-		testutil.Ok(t, err)
-
-		test.Close()
+	opts := promql.EngineOpts{
+		Logger:     nil,
+		Reg:        nil,
+		MaxSamples: 50000000,
+		Timeout:    100 * time.Second,
+		Parser: parser.NewParser(parser.Options{
+			EnableExperimentalFunctions:  true,
+			EnableExtendedRangeSelectors: true,
+		}),
 	}
+	engine := promqltest.NewTestEngineWithOpts(t, opts)
+
+	const interval = 10000 // 10s interval.
+	// A day of data plus 10k steps.
+	numIntervals := 8640 + 10000
+	err := setupRangeQueryTestData(stor, engine, interval, numIntervals)
+	require.NoError(t, err)
+
+	cases := rangeQueryCases()
+
+	// Limit the number of queries running at the same time.
+	const numConcurrent = 4
+	sem := make(chan struct{}, numConcurrent)
+	for range numConcurrent {
+		sem <- struct{}{}
+	}
+	var g errgroup.Group
+	for _, c := range cases {
+		if strings.Contains(c.expr, "count_values") && c.steps > 10 {
+			continue // This test is too big to run with -race.
+		}
+		if strings.Contains(c.expr, "[1d]") && c.steps > 100 {
+			continue // This test is too slow.
+		}
+		<-sem
+		g.Go(func() error {
+			defer func() {
+				sem <- struct{}{}
+			}()
+			ctx := context.Background()
+			qry, err := engine.NewRangeQuery(
+				ctx, stor, nil, c.expr,
+				time.Unix(int64((numIntervals-c.steps)*10), 0),
+				time.Unix(int64(numIntervals*10), 0), time.Second*10)
+			if err != nil {
+				return err
+			}
+			res := qry.Exec(ctx)
+			if res.Err != nil {
+				t.Logf("Query: %q, steps: %d, result: %s", c.expr, c.steps, res.Err)
+				return res.Err
+			}
+			qry.Close()
+			return nil
+		})
+	}
+
+	err = g.Wait()
+	require.NoError(t, err)
 }

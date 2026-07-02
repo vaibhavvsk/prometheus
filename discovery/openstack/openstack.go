@@ -1,4 +1,4 @@
-// Copyright 2017 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,17 +15,20 @@ package openstack
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
-	"github.com/go-kit/kit/log"
-	"github.com/gophercloud/gophercloud"
-	"github.com/gophercloud/gophercloud/openstack"
-	conntrack "github.com/mwitkow/go-conntrack"
-	"github.com/pkg/errors"
-	config_util "github.com/prometheus/common/config"
+	"github.com/gophercloud/gophercloud/v2"
+	"github.com/gophercloud/gophercloud/v2/openstack"
+	"github.com/mwitkow/go-conntrack"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
 
+	"github.com/prometheus/prometheus/discovery"
 	"github.com/prometheus/prometheus/discovery/refresh"
 	"github.com/prometheus/prometheus/discovery/targetgroup"
 )
@@ -34,27 +37,53 @@ import (
 var DefaultSDConfig = SDConfig{
 	Port:            80,
 	RefreshInterval: model.Duration(60 * time.Second),
+	Availability:    "public",
+}
+
+func init() {
+	discovery.RegisterConfig(&SDConfig{})
 }
 
 // SDConfig is the configuration for OpenStack based service discovery.
 type SDConfig struct {
-	IdentityEndpoint            string                `yaml:"identity_endpoint"`
-	Username                    string                `yaml:"username"`
-	UserID                      string                `yaml:"userid"`
-	Password                    config_util.Secret    `yaml:"password"`
-	ProjectName                 string                `yaml:"project_name"`
-	ProjectID                   string                `yaml:"project_id"`
-	DomainName                  string                `yaml:"domain_name"`
-	DomainID                    string                `yaml:"domain_id"`
-	ApplicationCredentialName   string                `yaml:"application_credential_name"`
-	ApplicationCredentialID     string                `yaml:"application_credential_id"`
-	ApplicationCredentialSecret config_util.Secret    `yaml:"application_credential_secret"`
-	Role                        Role                  `yaml:"role"`
-	Region                      string                `yaml:"region"`
-	RefreshInterval             model.Duration        `yaml:"refresh_interval,omitempty"`
-	Port                        int                   `yaml:"port"`
-	AllTenants                  bool                  `yaml:"all_tenants,omitempty"`
-	TLSConfig                   config_util.TLSConfig `yaml:"tls_config,omitempty"`
+	IdentityEndpoint            string           `yaml:"identity_endpoint"`
+	Username                    string           `yaml:"username"`
+	UserID                      string           `yaml:"userid"`
+	Password                    config.Secret    `yaml:"password"`
+	ProjectName                 string           `yaml:"project_name"`
+	ProjectID                   string           `yaml:"project_id"`
+	DomainName                  string           `yaml:"domain_name"`
+	DomainID                    string           `yaml:"domain_id"`
+	ApplicationCredentialName   string           `yaml:"application_credential_name"`
+	ApplicationCredentialID     string           `yaml:"application_credential_id"`
+	ApplicationCredentialSecret config.Secret    `yaml:"application_credential_secret"`
+	Role                        Role             `yaml:"role"`
+	Region                      string           `yaml:"region"`
+	RefreshInterval             model.Duration   `yaml:"refresh_interval"`
+	Port                        int              `yaml:"port"`
+	AllTenants                  bool             `yaml:"all_tenants,omitempty"`
+	TLSConfig                   config.TLSConfig `yaml:"tls_config,omitempty"`
+	Availability                string           `yaml:"availability,omitempty"`
+}
+
+// NewDiscovererMetrics implements discovery.Config.
+func (*SDConfig) NewDiscovererMetrics(_ prometheus.Registerer, rmi discovery.RefreshMetricsInstantiator) discovery.DiscovererMetrics {
+	return &openstackMetrics{
+		refreshMetrics: rmi,
+	}
+}
+
+// Name returns the name of the Config.
+func (*SDConfig) Name() string { return "openstack" }
+
+// NewDiscoverer returns a Discoverer for the Config.
+func (c *SDConfig) NewDiscoverer(opts discovery.DiscovererOptions) (discovery.Discoverer, error) {
+	return NewDiscovery(c, opts)
+}
+
+// SetDirectory joins any relative file paths with dir.
+func (c *SDConfig) SetDirectory(dir string) {
+	c.TLSConfig.SetDirectory(dir)
 }
 
 // Role is the role of the target in OpenStack.
@@ -68,35 +97,46 @@ const (
 	// OpenStack document reference
 	// https://docs.openstack.org/horizon/pike/user/launch-instances.html
 	OpenStackRoleInstance Role = "instance"
+	// Openstack document reference
+	// https://docs.openstack.org/openstacksdk/rocky/user/resources/load_balancer/index.html
+	OpenStackRoleLoadBalancer Role = "loadbalancer"
 )
 
 // UnmarshalYAML implements the yaml.Unmarshaler interface.
-func (c *Role) UnmarshalYAML(unmarshal func(interface{}) error) error {
+func (c *Role) UnmarshalYAML(unmarshal func(any) error) error {
 	if err := unmarshal((*string)(c)); err != nil {
 		return err
 	}
 	switch *c {
-	case OpenStackRoleHypervisor, OpenStackRoleInstance:
+	case OpenStackRoleHypervisor, OpenStackRoleInstance, OpenStackRoleLoadBalancer:
 		return nil
 	default:
-		return errors.Errorf("unknown OpenStack SD role %q", *c)
+		return fmt.Errorf("unknown OpenStack SD role %q", *c)
 	}
 }
 
 // UnmarshalYAML implements the yaml.Unmarshaler interface.
-func (c *SDConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
+func (c *SDConfig) UnmarshalYAML(unmarshal func(any) error) error {
 	*c = DefaultSDConfig
 	type plain SDConfig
 	err := unmarshal((*plain)(c))
 	if err != nil {
 		return err
 	}
+
+	switch c.Availability {
+	case "public", "internal", "admin":
+	default:
+		return fmt.Errorf("unknown availability %s, must be one of admin, internal or public", c.Availability)
+	}
+
 	if c.Role == "" {
-		return errors.New("role missing (one of: instance, hypervisor)")
+		return errors.New("role missing (one of: instance, hypervisor, loadbalancer)")
 	}
 	if c.Region == "" {
 		return errors.New("openstack SD configuration requires a region")
 	}
+
 	return nil
 }
 
@@ -105,21 +145,29 @@ type refresher interface {
 }
 
 // NewDiscovery returns a new OpenStack Discoverer which periodically refreshes its targets.
-func NewDiscovery(conf *SDConfig, l log.Logger) (*refresh.Discovery, error) {
-	r, err := newRefresher(conf, l)
+func NewDiscovery(conf *SDConfig, opts discovery.DiscovererOptions) (*refresh.Discovery, error) {
+	m, ok := opts.Metrics.(*openstackMetrics)
+	if !ok {
+		return nil, errors.New("invalid discovery metrics type")
+	}
+
+	r, err := newRefresher(conf, opts.Logger)
 	if err != nil {
 		return nil, err
 	}
 	return refresh.NewDiscovery(
-		l,
-		"openstack",
-		time.Duration(conf.RefreshInterval),
-		r.refresh,
+		refresh.Options{
+			Logger:              opts.Logger,
+			Mech:                "openstack",
+			SetName:             opts.SetName,
+			Interval:            time.Duration(conf.RefreshInterval),
+			RefreshF:            r.refresh,
+			MetricsInstantiator: m.refreshMetrics,
+		},
 	), nil
-
 }
 
-func newRefresher(conf *SDConfig, l log.Logger) (refresher, error) {
+func newRefresher(conf *SDConfig, l *slog.Logger) (refresher, error) {
 	var opts gophercloud.AuthOptions
 	if conf.IdentityEndpoint == "" {
 		var err error
@@ -146,26 +194,29 @@ func newRefresher(conf *SDConfig, l log.Logger) (refresher, error) {
 	if err != nil {
 		return nil, err
 	}
-	tls, err := config_util.NewTLSConfig(&conf.TLSConfig)
+	tls, err := config.NewTLSConfig(&conf.TLSConfig)
 	if err != nil {
 		return nil, err
 	}
 	client.HTTPClient = http.Client{
 		Transport: &http.Transport{
-			IdleConnTimeout: 5 * time.Duration(conf.RefreshInterval),
+			IdleConnTimeout: 2 * time.Duration(conf.RefreshInterval),
 			TLSClientConfig: tls,
 			DialContext: conntrack.NewDialContextFunc(
 				conntrack.DialWithTracing(),
 				conntrack.DialWithName("openstack_sd"),
 			),
 		},
-		Timeout: 5 * time.Duration(conf.RefreshInterval),
+		Timeout: time.Duration(conf.RefreshInterval),
 	}
+	availability := gophercloud.Availability(conf.Availability)
 	switch conf.Role {
 	case OpenStackRoleHypervisor:
-		return newHypervisorDiscovery(client, &opts, conf.Port, conf.Region, l), nil
+		return newHypervisorDiscovery(client, &opts, conf.Port, conf.Region, availability, l), nil
 	case OpenStackRoleInstance:
-		return newInstanceDiscovery(client, &opts, conf.Port, conf.Region, conf.AllTenants, l), nil
+		return newInstanceDiscovery(client, &opts, conf.Port, conf.Region, conf.AllTenants, availability, l), nil
+	case OpenStackRoleLoadBalancer:
+		return newLoadBalancerDiscovery(client, &opts, conf.Region, availability, l), nil
 	}
 	return nil, errors.New("unknown OpenStack discovery role")
 }

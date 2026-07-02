@@ -1,4 +1,4 @@
-// Copyright 2019 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,15 +15,22 @@ package refresh
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 
+	"github.com/prometheus/prometheus/discovery"
 	"github.com/prometheus/prometheus/discovery/targetgroup"
-	"github.com/prometheus/prometheus/util/testutil"
 )
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
+}
 
 func TestRefresh(t *testing.T) {
 	tg1 := []*targetgroup.Group{
@@ -49,7 +56,7 @@ func TestRefresh(t *testing.T) {
 	}
 
 	var i int
-	refresh := func(ctx context.Context) ([]*targetgroup.Group, error) {
+	refresh := func(context.Context) ([]*targetgroup.Group, error) {
 		i++
 		switch i {
 		case 1:
@@ -57,27 +64,40 @@ func TestRefresh(t *testing.T) {
 		case 2:
 			return tg2, nil
 		}
-		return nil, fmt.Errorf("some error")
+		return nil, errors.New("some error")
 	}
 	interval := time.Millisecond
-	d := NewDiscovery(nil, "test", interval, refresh)
+
+	metrics := discovery.NewRefreshMetrics(prometheus.NewRegistry())
+	require.NoError(t, metrics.Register())
+	defer metrics.Unregister()
+
+	d := NewDiscovery(
+		Options{
+			Logger:              nil,
+			Mech:                "test",
+			SetName:             "test-refresh",
+			Interval:            interval,
+			RefreshF:            refresh,
+			MetricsInstantiator: metrics,
+		},
+	)
 
 	ch := make(chan []*targetgroup.Group)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go d.Run(ctx, ch)
 
 	tg := <-ch
-	testutil.Equals(t, tg1, tg)
+	require.Equal(t, tg1, tg)
 
 	tg = <-ch
-	testutil.Equals(t, tg2, tg)
+	require.Equal(t, tg2, tg)
 
 	tick := time.NewTicker(2 * interval)
 	defer tick.Stop()
 	select {
 	case <-ch:
-		t.Fatal("Unexpected target group")
+		require.FailNow(t, "Unexpected target group")
 	case <-tick.C:
 	}
 }

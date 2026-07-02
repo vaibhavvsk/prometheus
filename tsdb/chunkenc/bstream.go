@@ -1,4 +1,4 @@
-// Copyright 2017 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -41,16 +41,21 @@
 
 package chunkenc
 
-import "io"
+import (
+	"encoding/binary"
+	"io"
+)
 
 // bstream is a stream of bits.
 type bstream struct {
-	stream []byte // the data stream
-	count  uint8  // how many bits are valid in current byte
+	stream []byte // The data stream.
+	count  uint8  // How many right-most bits are available for writing in the current byte (the last byte of the stream).
 }
 
-func newBReader(b []byte) bstream {
-	return bstream{stream: b, count: 8}
+// Reset resets b around stream.
+func (b *bstream) Reset(stream []byte) {
+	b.stream = stream
+	b.count = 0
 }
 
 func (b *bstream) bytes() []byte {
@@ -81,22 +86,24 @@ func (b *bstream) writeBit(bit bit) {
 
 func (b *bstream) writeByte(byt byte) {
 	if b.count == 0 {
-		b.stream = append(b.stream, 0)
-		b.count = 8
+		b.stream = append(b.stream, byt)
+		return
 	}
 
 	i := len(b.stream) - 1
 
-	// fill up b.b with b.count bits from byt
+	// Complete the last byte with the leftmost b.count bits from byt.
 	b.stream[i] |= byt >> (8 - b.count)
 
-	b.stream = append(b.stream, 0)
-	i++
-	b.stream[i] = byt << b.count
+	// Write the remainder, if any.
+	b.stream = append(b.stream, byt<<b.count)
 }
 
+// writeBits writes the nbits right-most bits of u to the stream
+// in left-to-right order.
+// TODO: Once XOR2 stabilizes, replace writeBits with the writeBitsFast implementation and remove writeBitsFast.
 func (b *bstream) writeBits(u uint64, nbits int) {
-	u <<= (64 - uint(nbits))
+	u <<= 64 - uint(nbits)
 	for nbits >= 8 {
 		byt := byte(u >> 56)
 		b.writeByte(byt)
@@ -111,90 +118,331 @@ func (b *bstream) writeBits(u uint64, nbits int) {
 	}
 }
 
-func (b *bstream) readBit() (bit, error) {
-	if len(b.stream) == 0 {
-		return false, io.EOF
-	}
+// writeBitsFast is like writeBits but handles the partial last byte inline to
+// avoid per-byte writeByte calls, and writes complete bytes directly to the
+// stream slice.
+func (b *bstream) writeBitsFast(u uint64, nbits int) {
+	u <<= 64 - uint(nbits)
 
-	if b.count == 0 {
-		b.stream = b.stream[1:]
-
-		if len(b.stream) == 0 {
-			return false, io.EOF
+	// If the last byte is partial, fill its remaining bits first.
+	if b.count > 0 {
+		free := int(b.count)
+		last := len(b.stream) - 1
+		b.stream[last] |= byte(u >> uint(64-free))
+		if nbits < free {
+			b.count = uint8(free - nbits)
+			return
 		}
-		b.count = 8
-	}
-
-	d := (b.stream[0] << (8 - b.count)) & 0x80
-	b.count--
-	return d != 0, nil
-}
-
-func (b *bstream) ReadByte() (byte, error) {
-	return b.readByte()
-}
-
-func (b *bstream) readByte() (byte, error) {
-	if len(b.stream) == 0 {
-		return 0, io.EOF
-	}
-
-	if b.count == 0 {
-		b.stream = b.stream[1:]
-
-		if len(b.stream) == 0 {
-			return 0, io.EOF
-		}
-		return b.stream[0], nil
-	}
-
-	if b.count == 8 {
+		u <<= uint(free)
+		nbits -= free
 		b.count = 0
-		return b.stream[0], nil
 	}
 
-	byt := b.stream[0] << (8 - b.count)
-	b.stream = b.stream[1:]
-
-	if len(b.stream) == 0 {
-		return 0, io.EOF
-	}
-
-	// We just advanced the stream and can assume the shift to be 0.
-	byt |= b.stream[0] >> b.count
-
-	return byt, nil
-}
-
-func (b *bstream) readBits(nbits int) (uint64, error) {
-	var u uint64
-
+	// Write complete bytes directly, avoiding per-byte function call overhead.
 	for nbits >= 8 {
-		byt, err := b.readByte()
-		if err != nil {
-			return 0, err
-		}
-
-		u = (u << 8) | uint64(byt)
+		b.stream = append(b.stream, byte(u>>56))
+		u <<= 8
 		nbits -= 8
 	}
 
-	if nbits == 0 {
-		return u, nil
+	// Write any remaining bits as a partial final byte.
+	if nbits > 0 {
+		b.stream = append(b.stream, byte(u>>56))
+		b.count = uint8(8 - nbits)
+	}
+}
+
+type bstreamReader struct {
+	stream       []byte
+	streamOffset int // The offset from which read the next byte from the stream.
+
+	buffer uint64 // The current buffer, filled from the stream, containing up to 8 bytes from which read bits.
+	valid  uint8  // The number of right-most bits valid to read (from left) in the current 8 byte buffer.
+	last   byte   // A copy of the last byte of the stream.
+}
+
+func newBReader(b []byte) bstreamReader {
+	// The last byte of the stream can be updated later, so we take a copy.
+	var last byte
+	if len(b) > 0 {
+		last = b[len(b)-1]
+	}
+	return bstreamReader{
+		stream: b,
+		last:   last,
+	}
+}
+
+func (b *bstreamReader) readBit() (bit, error) {
+	if b.valid == 0 {
+		if !b.loadNextBuffer(1) {
+			return false, io.EOF
+		}
 	}
 
-	if nbits > int(b.count) {
-		u = (u << uint(b.count)) | uint64((b.stream[0]<<(8-b.count))>>(8-b.count))
-		nbits -= int(b.count)
-		b.stream = b.stream[1:]
+	return b.readBitFast()
+}
 
-		if len(b.stream) == 0 {
+// readBitFast is like readBit but can return io.EOF if the internal buffer is empty.
+// If it returns io.EOF, the caller should retry reading bits calling readBit().
+// This function must be kept small and a leaf in order to help the compiler inlining it
+// and further improve performances.
+func (b *bstreamReader) readBitFast() (bit, error) {
+	if b.valid == 0 {
+		return false, io.EOF
+	}
+
+	b.valid--
+	bitmask := uint64(1) << b.valid
+	return (b.buffer & bitmask) != 0, nil
+}
+
+// readBits constructs a uint64 with the nbits right-most bits
+// read from the stream, and any other bits 0.
+func (b *bstreamReader) readBits(nbits uint8) (uint64, error) {
+	if b.valid == 0 {
+		if !b.loadNextBuffer(nbits) {
 			return 0, io.EOF
 		}
-		b.count = 8
 	}
 
-	u = (u << uint(nbits)) | uint64((b.stream[0]<<(8-b.count))>>(8-uint(nbits)))
-	b.count -= uint8(nbits)
-	return u, nil
+	if nbits <= b.valid {
+		return b.readBitsFast(nbits)
+	}
+
+	// We have to read all remaining valid bits from the current buffer and a part from the next one.
+	bitmask := (uint64(1) << b.valid) - 1
+	nbits -= b.valid
+	v := (b.buffer & bitmask) << nbits
+	b.valid = 0
+
+	if !b.loadNextBuffer(nbits) {
+		return 0, io.EOF
+	}
+
+	bitmask = (uint64(1) << nbits) - 1
+	v |= ((b.buffer >> (b.valid - nbits)) & bitmask)
+	b.valid -= nbits
+
+	return v, nil
+}
+
+// readBitsFast is like readBits but can return io.EOF if the internal buffer is empty.
+// If it returns io.EOF, the caller should retry reading bits calling readBits().
+// This function must be kept small and a leaf in order to help the compiler inlining it
+// and further improve performances.
+func (b *bstreamReader) readBitsFast(nbits uint8) (uint64, error) {
+	if nbits > b.valid {
+		return 0, io.EOF
+	}
+
+	bitmask := (uint64(1) << nbits) - 1
+	b.valid -= nbits
+
+	return (b.buffer >> b.valid) & bitmask, nil
+}
+
+func (b *bstreamReader) ReadByte() (byte, error) {
+	v, err := b.readBits(8)
+	if err != nil {
+		return 0, err
+	}
+	return byte(v), nil
+}
+
+// readXOR2ControlFast is like readXOR2Control but returns false when the
+// internal buffer has fewer than 4 valid bits, or when the control prefix
+// indicates cases 4 or 5 (top4 == 0xf). The caller should retry with
+// readXOR2Control. This function must be kept small and a leaf in order to
+// help the compiler inlining it and further improve performance.
+func (b *bstreamReader) readXOR2ControlFast() (uint8, bool) {
+	if b.valid < 4 {
+		return 0, false
+	}
+	top4 := uint8((b.buffer >> (b.valid - 4)) & 0xf)
+	if top4 < 8 { // '0xxx': dod=0, val=0 (case 0).
+		b.valid--
+		return 0, true
+	}
+	if top4 < 12 { // '10xx': dod=0, val changed (case 1).
+		b.valid -= 2
+		return 1, true
+	}
+	if top4 < 14 { // '110x': small dod (case 2).
+		b.valid -= 3
+		return 2, true
+	}
+	if top4 == 14 { // '1110': medium dod (case 3).
+		b.valid -= 4
+		return 3, true
+	}
+	return 0, false
+}
+
+// readXOR2Control reads the XOR2 variable-length joint control prefix
+// and returns 0-5 mapping to the six encoding cases:
+//
+//	0 → '0'     dod=0, val=0               (1 bit consumed)
+//	1 → '10'    dod=0, val≠0               (2 bits consumed)
+//	2 → '110'   dod≠0, 13-bit signed dod   (3 bits consumed)
+//	3 → '1110'  dod≠0, 20-bit signed dod   (4 bits consumed)
+//	4 → '11110' dod≠0, 64-bit escape       (5 bits consumed)
+//	5 → '11111' dod=0, stale NaN           (5 bits consumed)
+//
+// The fast path peeks at 4 bits from the internal buffer; for the '1111'
+// prefix a fifth bit is read to distinguish cases 4 and 5.
+func (b *bstreamReader) readXOR2Control() (uint8, error) {
+	if b.valid >= 4 {
+		top4 := uint8((b.buffer >> (b.valid - 4)) & 0xf)
+		if top4 < 8 { // '0xxx' → case 0.
+			b.valid--
+			return 0, nil
+		}
+		if top4 < 12 { // '10xx' → case 1.
+			b.valid -= 2
+			return 1, nil
+		}
+		if top4 < 14 { // '110x' → case 2.
+			b.valid -= 3
+			return 2, nil
+		}
+		if top4 == 14 { // '1110' → case 3.
+			b.valid -= 4
+			return 3, nil
+		}
+		// '1111': need fifth bit to distinguish cases 4 and 5.
+		if b.valid >= 5 {
+			bit4 := uint8((b.buffer >> (b.valid - 5)) & 1)
+			b.valid -= 5
+			return 4 + bit4, nil
+		}
+		// Fifth bit spans a buffer boundary; consume the four known bits
+		// and read the fifth from the stream.
+		b.valid -= 4
+		bit4, err := b.readBit()
+		if err != nil {
+			return 0, err
+		}
+		if bit4 == zero {
+			return 4, nil
+		}
+		return 5, nil
+	}
+
+	// Slow path: bits may span buffer boundaries, read one at a time.
+	bit0, err := b.readBit()
+	if err != nil {
+		return 0, err
+	}
+	if bit0 == zero {
+		return 0, nil
+	}
+	bit1, err := b.readBit()
+	if err != nil {
+		return 0, err
+	}
+	if bit1 == zero {
+		return 1, nil
+	}
+	bit2, err := b.readBit()
+	if err != nil {
+		return 0, err
+	}
+	if bit2 == zero {
+		return 2, nil
+	}
+	bit3, err := b.readBit()
+	if err != nil {
+		return 0, err
+	}
+	if bit3 == zero {
+		return 3, nil
+	}
+	bit4, err := b.readBit()
+	if err != nil {
+		return 0, err
+	}
+	if bit4 == zero {
+		return 4, nil
+	}
+	return 5, nil
+}
+
+// readUvarint decodes a varint-encoded uint64 using direct method calls,
+// avoiding the io.ByteReader interface dispatch used by binary.ReadUvarint,
+// which causes the receiver to escape to the heap.
+func (b *bstreamReader) readUvarint() (uint64, error) {
+	var x uint64
+	var s uint
+	for range binary.MaxVarintLen64 {
+		byt, err := b.ReadByte()
+		if err != nil {
+			return x, err
+		}
+		if byt < 0x80 {
+			return x | uint64(byt)<<s, nil
+		}
+		x |= uint64(byt&0x7f) << s
+		s += 7
+	}
+	return x, io.ErrUnexpectedEOF
+}
+
+// readVarint decodes a varint-encoded int64 using direct method calls,
+// avoiding the io.ByteReader interface dispatch used by binary.ReadVarint,
+// which causes the receiver to escape to the heap.
+func (b *bstreamReader) readVarint() (int64, error) {
+	ux, err := b.readUvarint()
+	x := int64(ux >> 1)
+	if ux&1 != 0 {
+		x = ^x
+	}
+	return x, err
+}
+
+// loadNextBuffer loads the next bytes from the stream into the internal buffer.
+// The input nbits is the minimum number of bits that must be read, but the implementation
+// can read more (if possible) to improve performances.
+func (b *bstreamReader) loadNextBuffer(nbits uint8) bool {
+	if b.streamOffset >= len(b.stream) {
+		return false
+	}
+
+	// Handle the case there are more then 8 bytes in the buffer (most common case)
+	// in a optimized way. It's guaranteed that this branch will never read from the
+	// very last byte of the stream (which suffers race conditions due to concurrent
+	// writes).
+	if b.streamOffset+8 < len(b.stream) {
+		b.buffer = binary.BigEndian.Uint64(b.stream[b.streamOffset:])
+		b.streamOffset += 8
+		b.valid = 64
+		return true
+	}
+
+	// We're here if there are 8 or less bytes left in the stream.
+	// The following code is slower but called less frequently.
+	nbytes := int((nbits / 8) + 1)
+	if b.streamOffset+nbytes > len(b.stream) {
+		nbytes = len(b.stream) - b.streamOffset
+	}
+
+	buffer := uint64(0)
+	skip := 0
+	if b.streamOffset+nbytes == len(b.stream) {
+		// There can be concurrent writes happening on the very last byte
+		// of the stream, so use the copy we took at initialization time.
+		buffer |= uint64(b.last)
+		// Read up to the byte before
+		skip = 1
+	}
+
+	for i := 0; i < nbytes-skip; i++ {
+		buffer |= (uint64(b.stream[b.streamOffset+i]) << uint(8*(nbytes-i-1)))
+	}
+
+	b.buffer = buffer
+	b.streamOffset += nbytes
+	b.valid = uint8(nbytes * 8)
+
+	return true
 }

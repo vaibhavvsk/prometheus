@@ -1,4 +1,4 @@
-// Copyright 2015 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -14,17 +14,15 @@
 package influxdb
 
 import (
-	"io/ioutil"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"testing"
-	"time"
-
-	influx "github.com/influxdata/influxdb/client/v2"
 
 	"github.com/prometheus/common/model"
+	"github.com/stretchr/testify/require"
 )
 
 func TestClient(t *testing.T) {
@@ -69,43 +67,25 @@ func TestClient(t *testing.T) {
 	}
 
 	expectedBody := `testmetric,test_label=test_label_value1 value=1.23 123456789123
+
 testmetric,test_label=test_label_value2 value=5.1234 123456789123
 `
 
 	server := httptest.NewServer(http.HandlerFunc(
-		func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != "POST" {
-				t.Fatalf("Unexpected method; expected POST, got %s", r.Method)
-			}
-			if r.URL.Path != "/write" {
-				t.Fatalf("Unexpected path; expected %s, got %s", "/write", r.URL.Path)
-			}
-			b, err := ioutil.ReadAll(r.Body)
-			if err != nil {
-				t.Fatalf("Error reading body: %s", err)
-			}
-
-			if string(b) != expectedBody {
-				t.Fatalf("Unexpected request body; expected:\n\n%s\n\ngot:\n\n%s", expectedBody, string(b))
-			}
+		func(_ http.ResponseWriter, r *http.Request) {
+			require.Equal(t, http.MethodPost, r.Method, "Unexpected method.")
+			require.Equal(t, "/api/v2/write", r.URL.Path, "Unexpected path.")
+			b, err := io.ReadAll(r.Body)
+			require.NoError(t, err, "Error reading body.")
+			require.Equal(t, expectedBody, string(b), "Unexpected request body.")
 		},
 	))
 	defer server.Close()
 
 	serverURL, err := url.Parse(server.URL)
-	if err != nil {
-		t.Fatalf("Unable to parse server URL %s: %s", server.URL, err)
-	}
+	require.NoError(t, err, "Unable to parse server URL.")
 
-	conf := influx.HTTPConfig{
-		Addr:     serverURL.String(),
-		Username: "testuser",
-		Password: "testpass",
-		Timeout:  time.Minute,
-	}
-	c := NewClient(nil, conf, "test_db", "default")
-
-	if err := c.Write(samples); err != nil {
-		t.Fatalf("Error sending samples: %s", err)
-	}
+	c := NewClient(nil, serverURL.String(), "auth_token", "test_organization", "test_bucket")
+	err = c.Write(samples)
+	require.NoError(t, err, "Error sending samples.")
 }

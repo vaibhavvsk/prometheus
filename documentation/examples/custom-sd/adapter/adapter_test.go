@@ -1,4 +1,4 @@
-// Copyright 2018 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -15,13 +15,14 @@ package adapter
 
 import (
 	"context"
-	"github.com/prometheus/prometheus/util/testutil"
-	"io/ioutil"
 	"os"
-	"reflect"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
+	"github.com/stretchr/testify/require"
+
+	"github.com/prometheus/prometheus/discovery"
 	"github.com/prometheus/prometheus/discovery/targetgroup"
 )
 
@@ -216,24 +217,28 @@ func TestGenerateTargetGroups(t *testing.T) {
 
 	for _, testCase := range testCases {
 		result := generateTargetGroups(testCase.targetGroup)
-
-		if !reflect.DeepEqual(result, testCase.expectedCustomSD) {
-			t.Errorf("%q failed\ngot: %#v\nexpected: %v",
-				testCase.title,
-				result,
-				testCase.expectedCustomSD)
-		}
-
+		require.Equal(t, testCase.expectedCustomSD, result)
 	}
 }
 
 // TestWriteOutput checks the adapter can write a file to disk.
 func TestWriteOutput(t *testing.T) {
 	ctx := context.Background()
-	tmpfile, err := ioutil.TempFile("", "sd_adapter_test")
-	testutil.Ok(t, err)
+	tmpfile, err := os.CreateTemp("", "sd_adapter_test")
+	require.NoError(t, err)
 	defer os.Remove(tmpfile.Name())
 	tmpfile.Close()
-	adapter := NewAdapter(ctx, tmpfile.Name(), "test_sd", nil, nil)
-	testutil.Ok(t, adapter.writeOutput())
+	require.NoError(t, err)
+
+	reg := prometheus.NewRegistry()
+	refreshMetrics := discovery.NewRefreshMetrics(reg)
+	mechanismMetrics, err := discovery.RegisterSDMetrics(reg, refreshMetrics)
+	require.NoError(t, err)
+	sdMetrics := &discovery.SDMetrics{
+		MechanismMetrics: mechanismMetrics,
+		RefreshManager:   refreshMetrics,
+	}
+
+	adapter := NewAdapter(ctx, tmpfile.Name(), "test_sd", nil, nil, sdMetrics, reg)
+	require.NoError(t, adapter.writeOutput())
 }

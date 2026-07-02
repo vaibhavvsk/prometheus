@@ -1,4 +1,4 @@
-// Copyright 2013 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -17,16 +17,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
-	"io/ioutil"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/url"
 	"time"
 
-	"github.com/go-kit/kit/log"
-	"github.com/go-kit/kit/log/level"
-	"github.com/pkg/errors"
 	"github.com/prometheus/common/model"
 )
 
@@ -37,14 +35,14 @@ const (
 
 // Client allows sending batches of Prometheus samples to OpenTSDB.
 type Client struct {
-	logger log.Logger
+	logger *slog.Logger
 
 	url     string
 	timeout time.Duration
 }
 
 // NewClient creates a new Client.
-func NewClient(logger log.Logger, url string, timeout time.Duration) *Client {
+func NewClient(logger *slog.Logger, url string, timeout time.Duration) *Client {
 	return &Client{
 		logger:  logger,
 		url:     url,
@@ -79,7 +77,7 @@ func (c *Client) Write(samples model.Samples) error {
 	for _, s := range samples {
 		v := float64(s.Value)
 		if math.IsNaN(v) || math.IsInf(v, 0) {
-			level.Debug(c.logger).Log("msg", "cannot send value to OpenTSDB, skipping sample", "value", v, "sample", s)
+			c.logger.Debug("Cannot send value to OpenTSDB, skipping sample", "value", v, "sample", s)
 			continue
 		}
 		metric := TagValue(s.Metric[model.MetricNameLabel])
@@ -106,7 +104,7 @@ func (c *Client) Write(samples model.Samples) error {
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()
 
-	req, err := http.NewRequest("POST", u.String(), bytes.NewBuffer(buf))
+	req, err := http.NewRequest(http.MethodPost, u.String(), bytes.NewBuffer(buf))
 	if err != nil {
 		return err
 	}
@@ -116,7 +114,7 @@ func (c *Client) Write(samples model.Samples) error {
 		return err
 	}
 	defer func() {
-		io.Copy(ioutil.Discard, resp.Body)
+		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 	}()
 
@@ -128,7 +126,7 @@ func (c *Client) Write(samples model.Samples) error {
 
 	// API returns status code 400 on error, encoding error details in the
 	// response content in JSON.
-	buf, err = ioutil.ReadAll(resp.Body)
+	buf, err = io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}
@@ -137,10 +135,10 @@ func (c *Client) Write(samples model.Samples) error {
 	if err := json.Unmarshal(buf, &r); err != nil {
 		return err
 	}
-	return errors.Errorf("failed to write %d samples to OpenTSDB, %d succeeded", r["failed"], r["success"])
+	return fmt.Errorf("failed to write %d samples to OpenTSDB, %d succeeded", r["failed"], r["success"])
 }
 
 // Name identifies the client as an OpenTSDB client.
-func (c Client) Name() string {
+func (Client) Name() string {
 	return "opentsdb"
 }

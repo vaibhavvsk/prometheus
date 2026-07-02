@@ -1,4 +1,4 @@
-// Copyright 2017 The Prometheus Authors
+// Copyright The Prometheus Authors
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
@@ -14,43 +14,72 @@
 package teststorage
 
 import (
-	"io/ioutil"
+	"fmt"
 	"os"
+	"testing"
 	"time"
 
-	"github.com/prometheus/common/model"
-	"github.com/prometheus/prometheus/storage"
-	"github.com/prometheus/prometheus/storage/tsdb"
-	"github.com/prometheus/prometheus/util/testutil"
+	"github.com/stretchr/testify/require"
+
+	"github.com/prometheus/prometheus/tsdb"
 )
 
-// New returns a new storage for testing purposes
-// that removes all associated files on closing.
-func New(t testutil.T) storage.Storage {
-	dir, err := ioutil.TempDir("", "test_storage")
-	if err != nil {
-		t.Fatalf("Opening test dir failed: %s", err)
-	}
+type Option func(opt *tsdb.Options)
 
-	// Tests just load data for a series sequentially. Thus we
-	// need a long appendable window.
-	db, err := tsdb.Open(dir, nil, nil, &tsdb.Options{
-		MinBlockDuration: model.Duration(24 * time.Hour),
-		MaxBlockDuration: model.Duration(24 * time.Hour),
+// New returns a new TestStorage for testing purposes
+// that removes all associated files on closing.
+//
+// Caller does not need to close the TestStorage after use, it's deferred via t.Cleanup.
+func New(t testing.TB, o ...Option) *TestStorage {
+	s, err := NewWithError(o...)
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		_ = s.Close() // Ignore errors, as it could be a double close.
 	})
-	if err != nil {
-		t.Fatalf("Opening test storage failed: %s", err)
-	}
-	return testStorage{Storage: tsdb.Adapter(db, int64(0)), dir: dir}
+	return s
 }
 
-type testStorage struct {
-	storage.Storage
+// NewWithError returns a new TestStorage for user facing tests, which reports
+// errors directly.
+//
+// It's a caller responsibility to close the TestStorage after use.
+func NewWithError(o ...Option) (*TestStorage, error) {
+	// Tests just load data for a series sequentially. Thus we
+	// need a long appendable window.
+	opts := tsdb.DefaultOptions()
+	opts.MinBlockDuration = int64(24 * time.Hour / time.Millisecond)
+	opts.MaxBlockDuration = int64(24 * time.Hour / time.Millisecond)
+	opts.RetentionDuration = 0
+	opts.OutOfOrderTimeWindow = 0
+
+	// Enable exemplars storage by default.
+	opts.EnableExemplarStorage = true
+	opts.MaxExemplars = 1e5
+
+	for _, opt := range o {
+		opt(opts)
+	}
+
+	dir, err := os.MkdirTemp("", "test_storage")
+	if err != nil {
+		return nil, fmt.Errorf("opening test directory: %w", err)
+	}
+
+	db, err := tsdb.Open(dir, nil, nil, opts, tsdb.NewDBStats())
+	if err != nil {
+		return nil, fmt.Errorf("opening test storage: %w", err)
+	}
+	return &TestStorage{DB: db, dir: dir}, nil
+}
+
+type TestStorage struct {
+	*tsdb.DB
 	dir string
 }
 
-func (s testStorage) Close() error {
-	if err := s.Storage.Close(); err != nil {
+func (s TestStorage) Close() error {
+	if err := s.DB.Close(); err != nil {
 		return err
 	}
 	return os.RemoveAll(s.dir)
