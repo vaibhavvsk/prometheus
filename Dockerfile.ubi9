@@ -2,29 +2,29 @@ ARG ARCH="amd64"
 ARG OS="linux"
 
 # ── Builder stage ──────────────────────────────────────────────────────────────
-# Uses the official Go image (Debian Bookworm-based) so no local Go or Node
-# installation is required on the host — Docker handles the full build.
-# go.mod requires 1.25.7; .promu.yml targets 1.26 — use 1.26 to satisfy both.
-FROM golang:1.26-bookworm AS builder
+# Uses Red Hat's official UBI9 Go toolset image so the entire build chain is
+# UBI9-based — no Debian tooling is introduced at any stage.
+# go-toolset ships Go 1.21+; the image is rebuilt regularly with security fixes.
+FROM registry.access.redhat.com/ubi9/go-toolset:latest AS builder
+
+# go-toolset defaults to a non-root user; switch to root for package installs.
+USER root
 
 ARG ARCH="amd64"
 ARG OS="linux"
 
 WORKDIR /src
 
-# ── Step 1: install Node.js 22 + pnpm ─────────────────────────────────────────
+# ── Step 1: install build tools + pnpm ───────────────────────────────────────
 # The web UI (builtinassets tag) must be compiled and compressed before the Go
 # build. scripts/compress_assets.sh generates web/ui/embed.go which declares
 # EmbedFS — without it the builtinassets-tagged Go code fails to compile.
-# Node version pinned to match web/ui/.nvmrc (22.x).
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        curl \
-        dos2unix \
-        gzip \
-    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
-    && npm install -g pnpm \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+# go-toolset:latest already ships Node.js 22 — no NodeSource install needed.
+# Only dos2unix, gzip, and tar are missing from the base image.
+RUN dnf install -y dos2unix gzip tar \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf \
+    && npm install -g pnpm
 
 # ── Step 2: cache Go modules ───────────────────────────────────────────────────
 # Copy only manifests first so this layer is only invalidated when dependencies
@@ -59,7 +59,7 @@ RUN cd web/ui && pnpm install --frozen-lockfile
 COPY . .
 
 # Fix Windows CRLF line endings in shell scripts before executing them.
-# The repo was checked out on Windows (git core.autocrlf=true), which adds \r
+# The repo may be checked out on Windows (git core.autocrlf=true), which adds \r
 # to every line. Linux bash fails with "$'\r': command not found". dos2unix
 # strips the carriage returns in-place before any script is executed.
 RUN find web/ui scripts -name "*.sh" | xargs dos2unix
@@ -108,7 +108,8 @@ RUN mkdir -p /out && \
 # ── Runtime stage ──────────────────────────────────────────────────────────────
 # Red Hat UBI 9 Minimal — RHEL-derived, RPM-patched CVEs, OpenShift-native.
 # No Go toolchain, no build cache, no source code is present in this layer.
-FROM registry.access.redhat.com/ubi9/ubi-minimal:9.6
+# :latest ensures the most recent security-patched UBI9 minimal image is used.
+FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
 
 LABEL maintainer="The Prometheus Authors <prometheus-developers@googlegroups.com>"
 LABEL org.opencontainers.image.authors="The Prometheus Authors" \
