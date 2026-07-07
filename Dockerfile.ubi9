@@ -1,0 +1,151 @@
+ARG ARCH="amd64"
+ARG OS="linux"
+
+# ── Builder stage ──────────────────────────────────────────────────────────────
+# Uses the official Go image (Debian Bookworm-based) so no local Go or Node
+# installation is required on the host — Docker handles the full build.
+# go.mod requires 1.25.7; .promu.yml targets 1.26 — use 1.26 to satisfy both.
+FROM golang:1.26-bookworm AS builder
+
+ARG ARCH="amd64"
+ARG OS="linux"
+
+WORKDIR /src
+
+# ── Step 1: install Node.js 22 + pnpm ─────────────────────────────────────────
+# The web UI (builtinassets tag) must be compiled and compressed before the Go
+# build. scripts/compress_assets.sh generates web/ui/embed.go which declares
+# EmbedFS — without it the builtinassets-tagged Go code fails to compile.
+# Node version pinned to match web/ui/.nvmrc (22.x).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl \
+        dos2unix \
+        gzip \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g pnpm \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# ── Step 2: cache Go modules ───────────────────────────────────────────────────
+# Copy only manifests first so this layer is only invalidated when dependencies
+# change, not on every source edit.
+COPY go.mod go.sum ./
+COPY web/ui/mantine-ui/src/promql/tools/go.mod   web/ui/mantine-ui/src/promql/tools/go.mod
+COPY web/ui/mantine-ui/src/promql/tools/go.sum   web/ui/mantine-ui/src/promql/tools/go.sum
+COPY documentation/examples/remote_storage/go.mod documentation/examples/remote_storage/go.mod
+COPY documentation/examples/remote_storage/go.sum documentation/examples/remote_storage/go.sum
+COPY internal/tools/go.mod                        internal/tools/go.mod
+COPY internal/tools/go.sum                        internal/tools/go.sum
+COPY compliance/go.mod                            compliance/go.mod
+COPY compliance/go.sum                            compliance/go.sum
+
+RUN go mod download
+
+# ── Step 3: cache pnpm dependencies ───────────────────────────────────────────
+# Copy only the lock-files and package manifests so the pnpm install layer is
+# only invalidated when JS dependencies change.
+# NOTE: react-app is intentionally excluded from pnpm-workspace.yaml (it has
+# conflicting dependencies with mantine-ui). We build mantine-ui only, which is
+# the active UI — matching Makefile target BUILD_UI=mantine.
+COPY web/ui/package.json          web/ui/package.json
+COPY web/ui/pnpm-lock.yaml        web/ui/pnpm-lock.yaml
+COPY web/ui/pnpm-workspace.yaml   web/ui/pnpm-workspace.yaml
+COPY web/ui/mantine-ui/package.json          web/ui/mantine-ui/package.json
+COPY web/ui/module                           web/ui/module
+
+RUN cd web/ui && pnpm install --frozen-lockfile
+
+# ── Step 4: copy full source and build UI ─────────────────────────────────────
+COPY . .
+
+# Fix Windows CRLF line endings in shell scripts before executing them.
+# The repo was checked out on Windows (git core.autocrlf=true), which adds \r
+# to every line. Linux bash fails with "$'\r': command not found". dos2unix
+# strips the carriage returns in-place before any script is executed.
+RUN find web/ui scripts -name "*.sh" | xargs dos2unix
+
+# Build only the mantine-ui (the active UI, replaces the legacy react-app).
+# build:mantine-ui = build_ui.sh --mantine-ui, which runs:
+#   buildModule  (lezer-promql, codemirror-promql)
+#   buildMantineUI (vite build → web/ui/static/mantine-ui/)
+# Then compress_assets.sh:
+#   1. copies embed.go.tmpl → web/ui/embed.go
+#   2. gzip-compresses every file under web/ui/static/
+#   3. appends //go:embed directives + "var EmbedFS embed.FS" to embed.go
+# Without compress_assets.sh the builtinassets tag causes: undefined: EmbedFS
+RUN cd web/ui && CI="" pnpm run build:mantine-ui
+RUN bash scripts/compress_assets.sh
+
+# ── Step 5: compile Go binaries ───────────────────────────────────────────────
+# -trimpath:     strips host paths from the binary (reproducibility).
+# netgo:         pure-Go DNS resolver, no libc dependency at runtime.
+# builtinassets: embeds the web UI generated in the previous step.
+# CGO_ENABLED=0: fully static binary; works on UBI9 minimal without glibc.
+RUN mkdir -p /out && \
+    CGO_ENABLED=0 GOOS=${OS} GOARCH=${ARCH} \
+    go build \
+      -trimpath \
+      -tags 'netgo builtinassets' \
+      -ldflags "-s -w \
+        -X github.com/prometheus/common/version.Version=$(cat VERSION) \
+        -X github.com/prometheus/common/version.Branch=unknown \
+        -X github.com/prometheus/common/version.BuildUser=docker \
+        -X github.com/prometheus/common/version.BuildDate=$(date -u +%Y%m%d-%H:%M:%S)" \
+      -o /out/prometheus \
+      ./cmd/prometheus && \
+    CGO_ENABLED=0 GOOS=${OS} GOARCH=${ARCH} \
+    go build \
+      -trimpath \
+      -tags 'netgo builtinassets' \
+      -ldflags "-s -w \
+        -X github.com/prometheus/common/version.Version=$(cat VERSION) \
+        -X github.com/prometheus/common/version.Branch=unknown \
+        -X github.com/prometheus/common/version.BuildUser=docker \
+        -X github.com/prometheus/common/version.BuildDate=$(date -u +%Y%m%d-%H:%M:%S)" \
+      -o /out/promtool \
+      ./cmd/promtool
+
+# ── Runtime stage ──────────────────────────────────────────────────────────────
+# Red Hat UBI 9 Minimal — RHEL-derived, RPM-patched CVEs, OpenShift-native.
+# No Go toolchain, no build cache, no source code is present in this layer.
+FROM registry.access.redhat.com/ubi9/ubi-minimal:9.6
+
+LABEL maintainer="The Prometheus Authors <prometheus-developers@googlegroups.com>"
+LABEL org.opencontainers.image.authors="The Prometheus Authors" \
+      org.opencontainers.image.vendor="Prometheus" \
+      org.opencontainers.image.title="Prometheus" \
+      org.opencontainers.image.description="The Prometheus monitoring system and time series database" \
+      org.opencontainers.image.source="https://github.com/prometheus/prometheus" \
+      org.opencontainers.image.url="https://github.com/prometheus/prometheus" \
+      org.opencontainers.image.documentation="https://prometheus.io/docs" \
+      org.opencontainers.image.licenses="Apache License 2.0" \
+      io.prometheus.image.variant="ubi9"
+
+# Install only the two packages required at runtime; clean cache in same layer.
+#   ca-certificates – TLS trust store for HTTPS scrape targets and remote-write.
+#   tzdata          – time-zone database for correct log timestamps.
+# shadow-utils is not needed: UBI9 already ships UID/GID 65534 as "nobody",
+# so no useradd/groupadd call is required.
+RUN microdnf install -y ca-certificates tzdata \
+    && microdnf clean all \
+    && rm -rf /var/cache/dnf
+
+# Copy compiled binaries and default config from the builder stage.
+# --chown sets ownership at copy time — no extra RUN chown layer needed.
+COPY --from=builder --chown=65534:65534 /out/prometheus              /bin/prometheus
+COPY --from=builder --chown=65534:65534 /out/promtool                /bin/promtool
+COPY --chown=65534:65534 documentation/examples/prometheus.yml       /etc/prometheus/prometheus.yml
+COPY LICENSE                                                          /LICENSE
+COPY NOTICE                                                           /NOTICE
+
+WORKDIR /prometheus
+# The TSDB data directory must be writable by the service account.
+# g+w allows OpenShift's arbitrary UID (which runs in the nobody GID) to write.
+RUN chown 65534:65534 /prometheus && chmod g+w /prometheus
+
+USER       65534
+EXPOSE     9090
+VOLUME     [ "/prometheus" ]
+ENTRYPOINT [ "/bin/prometheus" ]
+CMD        [ "--config.file=/etc/prometheus/prometheus.yml", \
+             "--storage.tsdb.path=/prometheus" ]
